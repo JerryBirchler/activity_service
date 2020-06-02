@@ -1,7 +1,6 @@
 CREATE TABLE request (
     "uuid" uuid,
     body text,
-    content_type text,
     created timestamp,
     data text,
     display_message text,
