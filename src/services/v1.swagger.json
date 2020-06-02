@@ -1,0 +1,203 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "description": "",
+    "version": "1.0.0",
+    "title": "Activity Service"
+  },
+  "host": "localhost:8081",
+  "basePath": "/activity-service/v1",
+  "tags": [
+    {
+      "name": "request",
+      "description": ""
+    },
+    {
+      "name": "response",
+      "description": ""
+    }
+  ],
+  "schemes": [
+    "https"
+  ],
+  "paths": {
+    "/request": {
+      "get": {
+        "tags": [
+          "request"
+        ],
+        "summary": "",
+        "operationId": "",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "The number of consolidated accounts to skip before starting to collect the results. Default is zero.",
+            "type": "number",
+            "pattern": "^[1-9]\\d*$"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of consolidated accounts to return. Default is 10.",
+            "type": "number",
+            "pattern": "^[1-9]\\d*$"
+          },
+          {
+            "name": "order_by",
+            "in": "query",
+            "description": "The field by which to order results. Allowed fields are [last_updated_date, access_code_expiration_date, entitlements, ibm_cloud_account, cdir].",
+            "type": "string",
+            "example": "last_updated_date"
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "description": "If 'asc', then the field specified by 'order_by' will be sorted in ascending order. If 'desc', then the field specified by 'order_by' will be sorted in descending order.",
+            "type": "string",
+            "example": "asc"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful retrieval.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "accounts": {
+                  "$ref": "#/definitions/consolidated-accounts"
+                },
+                "total_count": {
+                  "type": "number",
+                  "example": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "request"
+        ],
+        "summary": "Create a request",
+        "operationId": "addAccount",
+        "consumes": [
+          "application/json"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "parameters": [
+          {
+            "in": "body",
+            "name": "body",
+            "description": "Request be created.",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/request"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful creation.",
+            "schema": {
+              "$ref": "#/definitions/request"
+            }
+          },
+          "400": {
+            "description": "Name is a required."
+          }
+        }
+      }
+    },
+    "/request/{uuid}": {
+      "get": {
+        "tags": [
+          "request"
+        ],
+        "summary": "Get a request by id.",
+        "operationId": "getRequestById",
+        "produces": [
+          "application/json"
+        ],
+        "parameters": [
+          {
+            "name": "uuid",
+            "in": "path",
+            "description": "uuid of the request to return",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful retrieval",
+            "schema": {
+              "$ref": "#/definitions/request"
+            }
+          },
+          "404": {
+            "description": "Request not found."
+          }
+        }
+      }
+    },
+  "definitions": {
+    "requests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/request"
+      }
+    },
+    "request": {
+      "type": "object",
+      "required": [
+        "uuid",
+        "method",
+        "url",
+        "task_id",
+        "state"
+      ],
+      "properties": {
+        "uuid": {
+          "type": "string",
+          "readOnly": true
+        },
+        "method": {
+          "type": "string",
+          "description": "the HTTP method"
+        },
+        "url": {
+          "type": "string",
+          "description": "the url of the asynchronous call"
+        },
+        "headers": {
+          "type": "string",
+          "description": "the HTTP headers"
+        },
+        "body": {
+          "type": "string",
+          "description": "the HTTP body"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "the task id returned from an API call"
+        },
+        "created": {
+          "type": "number",
+          "description": "Epoch time when the account detail updated recently"
+        },
+        "state": {
+          "type": "number",
+          "description": "state of the request, 0 initiated, 1 status updated, 2 completed"
+        }
+      }
+    }
+  }
+  }
+}

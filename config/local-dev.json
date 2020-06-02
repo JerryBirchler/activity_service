@@ -1,0 +1,17 @@
+{
+  "db": {
+    "clientOptions": {
+      "contactPoints": [
+        "127.0.0.1"
+      ],
+      "keyspace": "activity_service"
+    },
+    "ormOptions": {
+      "defaultReplicationStrategy" : {
+        "class": "SimpleStrategy",
+        "replication_factor": 1
+      },
+      "migration": "safe"
+    }
+  }
+}
