@@ -1,11 +1,11 @@
-CREATE TABLE request_metadata_index (
-    metadata_key text,
-    metadata_value text,
-    created timestamp,
+CREATE TABLE response_index (
+    key_name text,
+    key_value text,
+    response_date timestamp,
     "uuid" uuid,
-    PRIMARY KEY (metadata_key, metadata_value, created, "uuid")
+    PRIMARY KEY (key_name, key_value, response_date, "uuid")
 ) WITH
-  CLUSTERING ORDER BY (metadata_value ASC,created DESC,"uuid" ASC)
+  CLUSTERING ORDER BY (metadata_value ASC,response_date DESC,"uuid" ASC)
   AND comment=''
   AND read_repair_chance=0
   AND dclocal_read_repair_chance=0.1
@@ -19,7 +19,7 @@ CREATE TABLE request_metadata_index (
   AND caching={ 'keys':'ALL',
   'rows_per_partition':'NONE' }
   AND default_time_to_live=0
-  AND id='afde9e80-9ab2-11ea-8978-51b56621147b'
+  AND id='3279e9b0-9ab5-11ea-8978-51b56621147b'
   AND min_index_interval=128
   AND max_index_interval=2048
   AND memtable_flush_period_in_ms=0
