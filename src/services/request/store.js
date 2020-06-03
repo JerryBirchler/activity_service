@@ -5,6 +5,7 @@ const
     _ = require('lodash'),
     config = require('config')["access-code"],
     Uuid = require('cassandra-driver').types.Uuid,
+    validate = require('uuid-validate'),
     Request = models.instance.Request,
     Request_Index = models.instance.Request_Index,
     _reservedQueryStrings = { limit: true, offset: true },
@@ -46,7 +47,6 @@ Store.prototype.get = async function (query) {
     }
     return requests; 
 }
-
 
 Store.prototype.getByuuid = async function (uuid) {
     logger.info("Store getByuuid called");
@@ -106,8 +106,7 @@ function buildKeys(request, indices, properties) {
     let errors = false;
 
     if (has_indices(indices)) { 
-        for (let i = 0; i < indices.length; i++) {
-            const index = indices[i];
+        indices.forEach(index => {
             const key_name = index;
             let key_value = "";
             const key = { key_name: key_name, key_value: key_value };
@@ -115,16 +114,14 @@ function buildKeys(request, indices, properties) {
             const parts = index.split(',');
             logger.debug(`index: [${index}]`);
 
-            for (let p = 0; p < parts.length; p++) {
-                const part = parts[p];
+            parts.forEach(part => {
                 logger.debug(`part: [${part}]`);
                 if (_baseIndices[part]) {                    
-                    for (let it = 0; it < batch.length; it++) {
-                        const item = batch[it];
+                    batch.forEach(item => {
                         item.key_value += request[part];
                         item.key_value += '\u0000';    
                         logger.debug(`item: [${util.inspect(item)}]`);
-                    }
+                    });
                 } else {
                     if (part.startsWith("data.")) {
                         const subpart = part.substring(5);
@@ -136,13 +133,12 @@ function buildKeys(request, indices, properties) {
                         errors = true;
                     }                  
                 }            
-            }
-            for (let i = 0; i < batch.length; i++) {
-                const item = batch[i];
+            });
+            batch.forEach(item => {
                 logger.debug(`item: [${util.inspect(item)}]`);
                 keys.push({ key_name: item.key_name, key_value: item.key_value, created: request.created, uuid: Uuid.fromString(request.uuid) });            
-            }
-        }      
+            });
+        });
     }
 
     if (errors) {
@@ -156,32 +152,26 @@ function buildKeys(request, indices, properties) {
         const value = properties[part];
         if (value) {
             if (!Array.isArray(value)) {
-                for (let i = 0; i < batch.length; i++) {
-                    const item = batch[i];
+                batch.forEach(item => {
                     item.key_value += value;
                     item.key_value += '\u0000';    
-                }
+                });
                 return false;
             }
             if (value.length > 0) {            
                 const new_batch = [];
-                for (let i = 0; i < batch.length; i++) {
-                    const item = batch[i];
+                batch.forEach(item => {
                     logger.debug(`item: [${util.inspect(item)}]`);
-                    for (let a = 0; a < value.length; a++) {
-                        const array_value = value[a];
+                    value.forEach(array_value => {
                         const new_key = { key_name: item.key_name, key_value: item.key_value };                    
                         new_key.key_value += array_value;
                         new_key.key_value += '\u0000';    
                         new_batch.push(new_key);
-                    }
-                }
+                    });
+                });
                 logger.debug(`new_batch: [${util.inspect(new_batch)}]`);
                 batch.length = 0;
-                for (let i = 0; i < new_batch.length; i++) {
-                    const item = new_batch[i];
-                    batch.push(item);
-                } 
+                new_batch.forEach(item => batch.push(item));
                 logger.debug(`batch: [${util.inspect(batch)}]`);
                 return false;   
             }
@@ -194,7 +184,13 @@ function buildKeys(request, indices, properties) {
 
 Store.prototype.new = async function (request) {
     logger.info("Store new called");
-    let queries = [];
+    response = JSON.parse("{}")
+    const before = await this.getByuuid(request.uuid);
+    if (before && before.uuid) {
+        response.status = 409;
+        response.message = "Add new request failed: already exists";
+        return response;
+    }
 
     request.method = request.method || "POST";
     request.url = request.url || "";
@@ -213,6 +209,7 @@ Store.prototype.new = async function (request) {
     
     logger.debug(`keys: [${util.inspect(keys)}]`);    
 
+    const queries = [];
     queries.push(new Request({
         uuid: Uuid.fromString(request.uuid),
         method: request.method,
@@ -226,12 +223,12 @@ Store.prototype.new = async function (request) {
         created: request.created
     }).save({ return_query: true }));
 
-    for (let i = 0; i < keys.length; i++) {
-        const key = keys[i];
-        queries.push(new Request_Index(key).save({ return_query: true }));
-    }
+    keys.forEach(key => queries.push(new Request_Index(key).save({ return_query: true })));
 
     await models.doBatchAsync(queries);
+    response.status = 201;
+    response.message = "Created new request";
+    return response;
 };
 
 
@@ -245,7 +242,6 @@ function deleteQueryByKey(name, value, created, uuid) {
     
     return new RequestByKey(payload).delete({ return_query: true });
 };
-
 
 function saveQueryByKey(name, value, created, uuid) {
     const payload = {
@@ -366,24 +362,6 @@ Store.prototype.update = async function (uuid, after) {
     // Return it
     return after;
 };
-
-
-
-// Service Now account id
-Store.prototype.getbyKey = async function (key, value) {
-    let query = { key_name: key, key_value: value };
-    // Explicityly checking the value here instead of relying on falsy'ness. `false` is a value
-    // value for `value`.
-    if (value === "" || value === undefined || value === null){
-        delete query.key_value;
-    }
-    let results = await RequestByKey.findAsync(query);
-    if (!results || results.length === 0) return [];
-    let idList = results.map(acct => acct.acct_id);
-    return await this.getByIdList(idList);
-};
-
-
 
 module.exports = {
     new: () => new Store()

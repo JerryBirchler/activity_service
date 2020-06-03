@@ -6,6 +6,7 @@ const
     Store = require('./store'),
     log4js = require('log4js'),
     util = require('util'),
+    validate = require('uuid-validate'),
     _ = require('lodash');
 
 const logger = log4js.getLogger('Request');
@@ -38,8 +39,11 @@ class ActivityService {
 
     async getRequestByuuId(ctx) {
         logger.info("getting a request");
+        ctx.assert(ctx.params.uuid, 400, "'uuid' is not a valid UUID.");
+        ctx.assert(validate(ctx.params.uuid), 400, "'uuid' is not a valid UUID.");
         const result = await this._store.getByuuid(ctx.params.uuid);
         ctx.response.body = result;
+        ctx.status = 200;
         return ctx.response.body;
     }
 
@@ -54,8 +58,10 @@ class ActivityService {
         logger.debug(`Saving new request: ${util.inspect(ctx.response.body)}`);
 
         // Save and return it
-        ctx.response.body = await this._store.new(ctx.request.body);
-        ctx.status = 201;
+        const response = await this._store.new(ctx.request.body);
+        logger.debug(`response: ${response}`);
+        ctx.response.body = response.message;
+        ctx.status = response.status;
         return ctx.response.body;
     }
 }
