@@ -22,12 +22,28 @@ class ActivityService {
         const router = new Router(routerOptions);
         logger.info('initializing request service...');
 
-        router.post('/', parser, this.save.bind(this));
-        router.get('/:uuid', this.getById.bind(this));
+        router.get('/', this.getRequests.bind(this));
+        router.get('/:uuid', this.getRequestByuuId.bind(this));
+        router.post('/', parser, this.saveRequest.bind(this));
         return router.routes();
     }
 
-    async save(ctx) {
+    async getRequests(ctx) {
+        logger.info("getting requests");
+        ctx.assert(_.keysIn(ctx.query).length > 0, 400, "Must contain at least one query string parameter"); 
+        const result = await this._store.get(ctx.query);
+        ctx.response.body = result;
+        return ctx.response.body;
+    }
+
+    async getRequestByuuId(ctx) {
+        logger.info("getting a request");
+        const result = await this._store.getByuuid(ctx.params.uuid);
+        ctx.response.body = result;
+        return ctx.response.body;
+    }
+
+    async saveRequest(ctx) {
         logger.info("saving a request");
 
         ctx.assert(ctx.request.body.uuid, 400, "'uuid' field is missing.");
@@ -40,14 +56,6 @@ class ActivityService {
         // Save and return it
         ctx.response.body = await this._store.new(ctx.request.body);
         ctx.status = 201;
-        return ctx.response.body;
-    }
-
-
-    async getById(ctx) {
-        logger.info("getting a request");
-        const result = await this._store.getByuuid(ctx.params.uuid);
-        ctx.response.body = result;
         return ctx.response.body;
     }
 }

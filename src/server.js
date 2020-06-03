@@ -28,6 +28,12 @@ async function start(options) {
     // Configure middleware
     const app = new koa();
     app.use(bodyParser(config.bodyParser));
+    app.on('error', (err, ctx) => {
+        if (!err.expose){
+            logger.error(ctx.originalUrl, err);
+        }
+    });
+
     logger.info('initializing services...');
     // Load services
     await require('./services').init(app);

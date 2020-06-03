@@ -7,8 +7,10 @@ const
     Uuid = require('cassandra-driver').types.Uuid,
     Request = models.instance.Request,
     Request_Index = models.instance.Request_Index,
+    _reservedQueryStrings = { limit: true, offset: true },
     _baseIndices = {state: true, task_id: true},
     _notbaseIndices = {indices: true, foreignKeys: true, created: true, uuid: true};
+
 
 const logger = log4js.getLogger('activity-service-store');
 
@@ -19,11 +21,39 @@ Store.prototype.init = async function () {
     logger.info("Store init called");
 };
 
+Store.prototype.get = async function (query) {
+    logger.info("Store get called");
+    let key_name = "";
+    let key_value = "";
+    _.keysIn(query).forEach(key => {
+        logger.debug(`Store get key: [${key}]`);
+        if (!_reservedQueryStrings[key]) {
+            key_name += (key_name == "") ? key : "," + key;
+            key_value += query[key];
+            key_value += "\u0000";
+        }
+    });
+
+    logger.debug(`Store get key_name: [${key_name}], key_value: [${key_value}]`);
+    const uuids = {}
+    const indexes = await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value }}, { consistency: models.consistencies.local_quorum });
+    indexes.forEach(request => {
+        uuids[request.uuid] = true;
+    });
+    const requests = [];
+    for (let uuid in uuids) {
+        requests.push(await this.getByuuid(uuid));
+    }
+    return requests; 
+}
+
+
 Store.prototype.getByuuid = async function (uuid) {
     logger.info("Store getByuuid called");
     if (!uuid) return;
 
     logger.debug(`uuid: [${util.inspect(uuid)}]`);
+
     const request = await Request.findOneAsync({ uuid: Uuid.fromString(uuid) }, { consistency: models.consistencies.local_quorum });
     if (!request) return;
     const result = JSON.parse("{}");
@@ -92,7 +122,7 @@ function buildKeys(request, indices, properties) {
                     for (let it = 0; it < batch.length; it++) {
                         const item = batch[it];
                         item.key_value += request[part];
-                        item.key_value += ",";    
+                        item.key_value += '\u0000';    
                         logger.debug(`item: [${util.inspect(item)}]`);
                     }
                 } else {
@@ -110,9 +140,7 @@ function buildKeys(request, indices, properties) {
             for (let i = 0; i < batch.length; i++) {
                 const item = batch[i];
                 logger.debug(`item: [${util.inspect(item)}]`);
-                const len = item.key_value.length - 1;
-                const key_value = item.key_value.substr(0, len);
-                keys.push({ key_name: item.key_name, key_value: key_value, created: request.created, uuid: Uuid.fromString(request.uuid) });            
+                keys.push({ key_name: item.key_name, key_value: item.key_value, created: request.created, uuid: Uuid.fromString(request.uuid) });            
             }
         }      
     }
@@ -131,7 +159,7 @@ function buildKeys(request, indices, properties) {
                 for (let i = 0; i < batch.length; i++) {
                     const item = batch[i];
                     item.key_value += value;
-                    item.key_value += ",";    
+                    item.key_value += '\u0000';    
                 }
                 return false;
             }
@@ -144,7 +172,7 @@ function buildKeys(request, indices, properties) {
                         const array_value = value[a];
                         const new_key = { key_name: item.key_name, key_value: item.key_value };                    
                         new_key.key_value += array_value;
-                        new_key.key_value += ",";    
+                        new_key.key_value += '\u0000';    
                         new_batch.push(new_key);
                     }
                 }
@@ -169,7 +197,7 @@ Store.prototype.new = async function (request) {
     let queries = [];
 
     request.method = request.method || "POST";
-    request.url = request.method || "";
+    request.url = request.url || "";
     request.headers = request.headers || "{}";
     request.body = request.body || "";
     request.data = request.data || "{}";
