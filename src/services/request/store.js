@@ -8,7 +8,7 @@ const
     validate = require('uuid-validate'),
     Request = models.instance.Request,
     Request_Index = models.instance.Request_Index,
-    _reservedQueryStrings = { limit: true, offset: true, operator: "EQ" },
+    _reservedQueryStrings = { limit: true, offset: true, operator: "GE" },
     _baseIndices = {state: true, task_id: true},
     _notbaseIndices = {indices: true, foreignKeys: true, created: true, uuid: true};
 
@@ -28,6 +28,18 @@ Store.prototype.get = async function (query) {
     let key_value = "";
     let key_limit = "";
     const operator = query["operator"] || _reservedQueryStrings["operator"];
+    let opLevel = 999;
+    
+    if (operator.startsWith("GE") || operator.startsWith("GT")) {
+        if (operator.length > 2) {
+            const level = operator.substring(2);
+            if (!isNaN(level)) {
+                opLevel = parseInt(level, 10);
+            }
+        }        
+    }
+
+    let level = 0;
     _.keysIn(query).forEach(key => {
         logger.debug(`Store get key: [${key}]`);
         if (!_reservedQueryStrings[key]) {
@@ -35,16 +47,17 @@ Store.prototype.get = async function (query) {
             const value = query[key];
             key_value += value;
             key_value += "\u0000";
-            key_limit += value;
+            key_limit += (opLevel > level) ? value : "\uFFFF";
             key_limit += "\uFFFF";
+            level++;
         }
     });
 
-    logger.debug(`Store get key_name: [${key_name}], key_value: [${key_value}]`);
+    logger.debug(`Store get key_name: [${key_name}], key_value: [${key_value}], key_limit[${key_limit}], opLevel: [${opLevel}]`);
     const uuids = {}
-    const indexes = operator == "EQ" 
+    const indexes = operator.startsWith("GE") 
         ? await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum })
-        : await Request_Index.findAsync({ key_name, key_value: { '$gt': key_value }}, { consistency: models.consistencies.local_quorum });
+        : await Request_Index.findAsync({ key_name, key_value: { '$gt': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum });
     indexes.forEach(request => {
         uuids[request.uuid] = true;
     });
