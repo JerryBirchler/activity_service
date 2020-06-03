@@ -8,7 +8,7 @@ const
     validate = require('uuid-validate'),
     Request = models.instance.Request,
     Request_Index = models.instance.Request_Index,
-    _reservedQueryStrings = { limit: true, offset: true },
+    _reservedQueryStrings = { limit: true, offset: true, operator: "EQ" },
     _baseIndices = {state: true, task_id: true},
     _notbaseIndices = {indices: true, foreignKeys: true, created: true, uuid: true};
 
@@ -26,18 +26,25 @@ Store.prototype.get = async function (query) {
     logger.info("Store get called");
     let key_name = "";
     let key_value = "";
+    let key_limit = "";
+    const operator = query["operator"] || _reservedQueryStrings["operator"];
     _.keysIn(query).forEach(key => {
         logger.debug(`Store get key: [${key}]`);
         if (!_reservedQueryStrings[key]) {
             key_name += (key_name == "") ? key : "," + key;
-            key_value += query[key];
+            const value = query[key];
+            key_value += value;
             key_value += "\u0000";
+            key_limit += value;
+            key_limit += "\uFFFF";
         }
     });
 
     logger.debug(`Store get key_name: [${key_name}], key_value: [${key_value}]`);
     const uuids = {}
-    const indexes = await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value }}, { consistency: models.consistencies.local_quorum });
+    const indexes = operator == "EQ" 
+        ? await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum })
+        : await Request_Index.findAsync({ key_name, key_value: { '$gt': key_value }}, { consistency: models.consistencies.local_quorum });
     indexes.forEach(request => {
         uuids[request.uuid] = true;
     });
