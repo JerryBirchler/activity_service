@@ -58,14 +58,15 @@ Store.prototype.get = async function (query) {
     const indexes = operator.startsWith("GE") 
         ? await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum })
         : await Request_Index.findAsync({ key_name, key_value: { '$gt': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum });
+
     indexes.forEach(request => {
         uuids[request.uuid] = true;
     });
-    const requests = [];
+    const inClause = [];        
     for (let uuid in uuids) {
-        requests.push(await this.getByuuid(uuid));
+        inClause.push(Uuid.fromString(uuid));
     }
-    return requests; 
+    return await Request.findAsync({uuid: { '$in': inClause }}, { consistency: models.consistencies.local_quorum });
 }
 
 Store.prototype.getByuuid = async function (uuid) {

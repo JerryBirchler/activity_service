@@ -30,7 +30,7 @@ class ActivityService {
     }
 
     async getRequests(ctx) {
-        logger.info("getting requests");
+        logger.debug("getting requests");
         ctx.assert(_.keysIn(ctx.query).length > 0, 400, "Must contain at least one query string parameter"); 
         const result = await this._store.get(ctx.query);
         ctx.response.body = result;
@@ -38,7 +38,7 @@ class ActivityService {
     }
 
     async getRequestByuuId(ctx) {
-        logger.info("getting a request");
+        logger.debug("getting a request");
         ctx.assert(ctx.params.uuid, 400, "'uuid' is not a valid UUID.");
         ctx.assert(validate(ctx.params.uuid), 400, "'uuid' is not a valid UUID.");
         const result = await this._store.getByuuid(ctx.params.uuid);
@@ -48,7 +48,7 @@ class ActivityService {
     }
 
     async saveRequest(ctx) {
-        logger.info("saving a request");
+        logger.debug("saving a request");
 
         ctx.assert(ctx.request.body.uuid, 400, "'uuid' field is missing.");
         ctx.assert(ctx.request.body.method, 400, "'method' field is missing.");
