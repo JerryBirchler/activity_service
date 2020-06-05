@@ -12,7 +12,6 @@ const
     _baseIndices = {state: true, task_id: true},
     _notbaseIndices = {indices: true, foreignKeys: true, created: true, uuid: true};
 
-
 const logger = log4js.getLogger('activity-service-store');
 
 function Store() {
@@ -128,37 +127,9 @@ function buildKeys(request, indices, properties) {
 
     if (has_indices(indices)) { 
         indices.forEach(index => {
-            const key_name = index;
-            let key_value = "";
-            const key = { key_name: key_name, key_value: key_value };
-            const batch = [ key ];
-            const parts = index.split(',');
-            logger.debug(`index: [${index}]`);
-
-            parts.forEach(part => {
-                logger.debug(`part: [${part}]`);
-                if (_baseIndices[part]) {                    
-                    batch.forEach(item => {
-                        item.key_value += request[part];
-                        item.key_value += '\u0000';    
-                        logger.debug(`item: [${util.inspect(item)}]`);
-                    });
-                } else {
-                    if (part.startsWith("data.")) {
-                        const subpart = part.substring(5);
-                        errors = errors || buildValue(properties, subpart, batch);
-                    } else if (properties[part]) {
-                        errors = errors || buildValue(properties, part, batch);
-                    } else {
-                        log.info(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
-                        errors = true;
-                    }                  
-                }            
-            });
-            batch.forEach(item => {
-                logger.debug(`item: [${util.inspect(item)}]`);
-                keys.push({ key_name: item.key_name, key_value: item.key_value, created: request.created, uuid: Uuid.fromString(request.uuid) });            
-            });
+            const batch = buildKey(request, index, properties);
+            const interimError = buildKeyObject(request, batch, keys);
+            errors = errors || interimError;
         });
     }
 
@@ -167,46 +138,92 @@ function buildKeys(request, indices, properties) {
     }
 
     return keys;
+}
 
-    function buildValue(properties, part, batch) {
-        logger.debug(`batch: [${util.inspect(batch)}]`);
-        const value = properties[part];
-        if (value) {
-            if (!Array.isArray(value)) {
-                batch.forEach(item => {
-                    item.key_value += value;
-                    item.key_value += '\u0000';    
+function buildKeyObject(request, batch, keys) {
+    if (batch) {
+        batch.forEach(item => {
+            logger.debug(`item: [${util.inspect(item)}]`);
+            keys.push({ key_name: item.key_name, key_value: item.key_value, created: request.created, uuid: Uuid.fromString(request.uuid) });            
+        });   
+        return false 
+    } 
+
+    return true;    
+}
+
+function buildKey(request, index, properties) {
+    const key_name = index;
+    let errors = false;
+    let key_value = "";
+    const key = { key_name: key_name, key_value: key_value };
+    const batch = [ key ];
+    const parts = index.split(',');
+    logger.debug(`index: [${index}]`);
+
+    parts.forEach(part => {
+        logger.debug(`part: [${part}]`);
+        if (_baseIndices[part]) {                    
+            batch.forEach(item => {
+                item.key_value += request[part];
+                item.key_value += '\u0000';    
+                logger.debug(`item: [${util.inspect(item)}]`);
+            });
+        } else {
+            if (part.startsWith("data.")) {
+                const subpart = part.substring(5);
+                errors = errors || buildValue(properties, subpart, batch);
+            } else if (properties[part]) {
+                errors = errors || buildValue(properties, part, batch);
+            } else {
+                log.warn(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
+                errors = true;
+            }                  
+        }            
+    });
+
+    return errors ? null : batch;
+}
+
+function buildValue(properties, part, batch) {
+    logger.debug(`batch: [${util.inspect(batch)}]`);
+    const value = properties[part];
+    if (value) {
+        if (!Array.isArray(value)) {
+            batch.forEach(item => {
+                item.key_value += value;
+                item.key_value += '\u0000';    
+            });
+            return false;
+        }
+        if (value.length > 0) {            
+            const new_batch = [];
+            batch.forEach(item => {
+                logger.debug(`item: [${util.inspect(item)}]`);
+                value.forEach(array_value => {
+                    const new_key = { key_name: item.key_name, key_value: item.key_value };                    
+                    new_key.key_value += array_value;
+                    new_key.key_value += '\u0000';    
+                    new_batch.push(new_key);
                 });
-                return false;
-            }
-            if (value.length > 0) {            
-                const new_batch = [];
-                batch.forEach(item => {
-                    logger.debug(`item: [${util.inspect(item)}]`);
-                    value.forEach(array_value => {
-                        const new_key = { key_name: item.key_name, key_value: item.key_value };                    
-                        new_key.key_value += array_value;
-                        new_key.key_value += '\u0000';    
-                        new_batch.push(new_key);
-                    });
-                });
-                logger.debug(`new_batch: [${util.inspect(new_batch)}]`);
-                batch.length = 0;
-                new_batch.forEach(item => batch.push(item));
-                logger.debug(`batch: [${util.inspect(batch)}]`);
-                return false;   
-            }
-        } 
-        const key_name = batch[0].key_name;
-        log.info(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
-        return true;
-    }
+            });
+            logger.debug(`new_batch: [${util.inspect(new_batch)}]`);
+            batch.length = 0;
+            new_batch.forEach(item => batch.push(item));
+            logger.debug(`batch: [${util.inspect(batch)}]`);
+            return false;   
+        }
+    } 
+    const key_name = batch[0].key_name;
+    log.info(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
+    return true;
 }
 
 Store.prototype.new = async function (request) {
     logger.info("Store new called");
     response = JSON.parse("{}")
     const before = await this.getByuuid(request.uuid);
+
     if (before && before.uuid) {
         response.status = 409;
         response.message = "Add new request failed: already exists";
@@ -252,136 +269,133 @@ Store.prototype.new = async function (request) {
     return response;
 };
 
-
-function deleteQueryByKey(name, value, created, uuid) {
-    const payload = {
-        key_name: name,
-        key_value: value,
-        created: created,
-        uuid: id
-    };
+Store.prototype.update = async function (after, uuid) {
+    logger.info("Store update called");
+    response = JSON.parse("{}")
+    const before = await this.getByuuid(uuid);
     
-    return new RequestByKey(payload).delete({ return_query: true });
-};
+    if (!before) {
+        response.status = 409;
+        response.message = "Update existing request failed: does not exist";
+        return response;
+    
+    }
 
-function saveQueryByKey(name, value, created, uuid) {
-    const payload = {
-        key_name: name,
-        key_value: value,
-        created: created,
-        uuid: uuid
-    };
+    after.uuid = uuid;
+    after.method = before.method;
+    after.url = before.url;
+    after.headers = before.headers;
+    after.display_message = after.display_message || before.display_message;
+    after.state = after.state || before.state;
+    after.task_id = before.task_id;
+    after.created = before.created;
+    before.uuid = before.uuid.toString();
 
-    const query = new RequestByKey(payload).save({ return_query: true });
-    logger.debug(util.inspect(query));
-    return query;
+    logger.debug(`Store update after: ${util.inspect(after)}`)
 
+    const after_data = JSON.parse(after.data);
+    after_data.lastUpdated = after_data.lastUpdated || new Date().toISOString();
+
+    const before_data = JSON.parse(before.data);
+    const after_properties = getProperties(after_data);
+    const before_properties = getProperties(before_data);
+    const queries = [];
+
+    //========================================
+    // update indices where state has changed
+    //========================================
+    if (has_indices(before_data.indices)) {
+        const keys = [];
+        let errors = false;
+        before_data.indices.forEach(index => {
+            logger.debug(`Store update index: [${util.inspect(index)}] `);
+            if (before.state !== after.state && index.split(',').includes("state")) {
+                const batch = buildKey(before, index, before_properties);
+                const interimError = buildKeyObject(before, batch, keys);
+                errors = errors || interimError;
+            }
+        });
+        
+        keys.forEach(key => queries.push(new Request_Index(key).delete({ return_query: true })));
+
+        before_data.indices.forEach(index => {
+            logger.debug(`Store update index: [${util.inspect(index)}] `);
+            if (before.state !== after.state && index.split(',').includes("state")) {
+                const batch = buildKey(after, index, before_properties);
+                const interimError = buildKeyObject(after, batch, keys);
+                errors = errors || interimError;
+            }
+        });
+
+        keys.forEach(key => queries.push(new Request_Index(key).save({ return_query: true })));
+        queries.forEach(query => logger.debug(`Store update query: [${util.inspect(query)}]`));
+    }
+
+    //======================================================
+    // merge data from before and after and add lastUpdated
+    //======================================================
+    const data = before_data;
+    for (let property in after_properties) {
+        logger.debug(`Store update property: [${property}]`);
+        const parts = property.split('.');
+        try {
+            let data_cursor = data;
+            let after_cursor = after_data;
+            var BreakException = {};
+            var IncompatibleTypesException = { message: "Incompatible type merging data JSON." };
+            parts.forEach(part => {
+                if (!data_cursor[part])  {
+                    data_cursor[part] = after_cursor[part];
+                    throw BreakException;
+                }      
+                data_cursor = data_cursor[part];
+                after_cursor = after_cursor[part];
+                if (typeof data_cursor !== typeof after_cursor) {
+                    throw IncompatibleTypesException;
+                }
+                if (Array.isArray(data_cursor) !== Array.isArray(after_cursor)) {
+                    throw IncompatibleTypesException;
+                }
+                if (Array.isArray(data_cursor)) {
+                    after_cursor.forEach(item => {
+                        if (!data_cursor.includes(item)) {
+                            data_cursor.push(item);
+                        }
+                    });
+                    throw BreakException;
+                } 
+                if (typeof Array.data_cursor !== "object" ) {
+                    data_cursor = after_cursor;
+                    throw BreakException;
+                }
+            });
+        } catch(e) {
+            if (e !== BreakException) throw e;
+        }
+    }
+
+    after.data = JSON.stringify(data);
+    queries.push(new Request({
+        uuid: Uuid.fromString(after.uuid),
+        method: after.method,
+        url: after.url,
+        headers: after.headers,
+        body: after.body,
+        data: after.data,
+        display_message: after.display_message,
+        state: after.state,
+        task_id: after.task_id,
+        created: after.created
+    }).save({ return_query: true }));
+    await models.doBatchAsync(queries);
+
+    response.status = 200;
+    response.message = after;
+    return response;
 };
 
 function has_indices(indices) {
     return indices && Array.isArray(indices) && indices.length > 0;
-}
-
-function deleteQueriesByKey(queries, before, after, attr_type) {
-    const before_indices = before.data[indices];
-    const after_indices = after.data[indices];
-    if (has_indices(before_indices)) {
-        before_keys = buildKeys(before, before_indices, )
-        if (!has_indices(after_indices)) {
-            // delete them all
-            before_items.forEach(before_item => {
-                queries.push(this.deleteQueryByKey(
-                    attr_type,
-                    before_item,
-                    before.id));
-            });
-        } else {
-            // or delete the ones no longer on the list as of the update
-            const after_items = this.makeArray(after.attrs[attr_type]);
-            before_items.forEach(before_item => {
-                if (!after_items.includes(before_item)) {
-                    queries.push(this.deleteQueryByKey(
-                        attr_type,
-                        before_item,
-                        before.id));
-                }
-            });
-        }
-    }
-};
-
-Store.prototype.deleteQueriesByKeys = function (queries, before, after) {
-    for (let key in attrs) {
-        this.deleteQueriesByKey(queries, before, after, attrs[key]);
-    }
-};
-
-Store.prototype.saveQueriesByKeys = function (queries, after, id) {
-    for (let key in attrs) {
-        this.saveQueriesByKey(queries, after, id, attrs[key]);
-    }
-};
-
-Store.prototype.makeArray = function(data) {
-    if (Array.isArray(data)) return data;
-    data = "" + data;
-    return data.split(',');
-
-};
-
-Store.prototype.saveQueriesByKey = function(queries, attrs, id, attr_type) {
-    if (attrs[attr_type]) {
-        let items = this.makeArray(attrs[attr_type]);
-        // remember repetitive inserts are upserts in cassandra, this won't hurt you
-        // and it also mends the data where this logic was previously flawed
-        items.forEach(item => {
-            queries.push(this.saveQueryByKey(
-                attr_type,
-                item,
-                id));
-        });
-    }
-};
-
-Store.prototype.update = async function (uuid, after) {
-    let queries = [];
-
-    if (after.uuid && after.uuid !== uuid) {
-        after.error = { type: 400, message: 'UUID doesn\'t match.' };
-        return after;
-    }
-    // Force the id
-    if (!after.uuid) after.uuid = uuid;
-
-    // Get the existing record
-    const record = await Request.findOneAsync({ uuid });
-    // If we didn't get a record, then return undefined
-    if (!record) return;
-
-    let before = JSON.parse(record.data);
-    before.state = record.state;
-
-    // Enforcing access-code not to be updated through update
-    after.access_code = undefined;
-    if(before.access_code) {
-        after.access_code = before.access_code;
-    }
-
-    if (before.attrs) {
-        this.deleteQueriesByKeys(queries, before, after);
-    }
-
-    if (after.attrs) {
-        this.saveQueriesByKeys(queries, after.attrs, id);
-    }
-
-    //await this.createConsolidatedAccountQueries(queries, before, after)
-
-    logger.debug(util.inspect(queries));
-    await models.doBatchAsync(queries);
-
-    // Return it
-    return after;
 };
 
 module.exports = {

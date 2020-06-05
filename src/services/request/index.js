@@ -26,6 +26,7 @@ class ActivityService {
         router.get('/', this.getRequests.bind(this));
         router.get('/:uuid', this.getRequestByuuId.bind(this));
         router.post('/', parser, this.saveRequest.bind(this));
+        router.put('/:uuid', this.updateRequest.bind(this));
         return router.routes();
     }
 
@@ -59,6 +60,22 @@ class ActivityService {
 
         // Save and return it
         const response = await this._store.new(ctx.request.body);
+        logger.debug(`response: ${response}`);
+        ctx.response.body = response.message;
+        ctx.status = response.status;
+        return ctx.response.body;
+    }
+
+    async updateRequest(ctx) {
+        logger.debug("update a request");
+
+        ctx.assert(ctx.params.uuid, 400, "'uuid' is not a valid UUID.");
+        ctx.assert(validate(ctx.params.uuid), 400, "'uuid' is not a valid UUID.");
+
+        logger.debug(`Uodate existing request: ${util.inspect(ctx.response.body)}`);
+
+        // Save and return it
+        const response = await this._store.update(ctx.request.body, ctx.params.uuid);
         logger.debug(`response: ${response}`);
         ctx.response.body = response.message;
         ctx.status = response.status;
