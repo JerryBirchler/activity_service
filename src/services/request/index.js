@@ -27,6 +27,7 @@ class ActivityService {
         router.get('/:uuid', this.getRequestByuuId.bind(this));
         router.post('/', parser, this.saveRequest.bind(this));
         router.put('/:uuid', this.updateRequest.bind(this));
+        router.patch('/:action', this.patchRequestProperties.bind(this));
         return router.routes();
     }
 
@@ -81,7 +82,23 @@ class ActivityService {
         ctx.status = response.status;
         return ctx.response.body;
     }
+
+    async patchRequestProperties(ctx) {
+        logger.debug("patch request properties");
+
+        ctx.assert(ctx.params.action, 400, "'action' must be provided");
+        ctx.assert(ctx.params.action === "drop", 400, "'action' must be 'drop'");
+        ctx.assert(_.keysIn(ctx.query).length > 0, 400, "Must contain at least one query string parameter"); 
+        const response = await this._store.dropProperties(ctx.request.body, ctx.query);
+
+        logger.debug(`response: [${util.inspect(response)}]`);
+
+        ctx.response.body = response.message;
+        ctx.status = response.status;
+        return ctx.response.body;
+    }
 }
+
 
 module.exports = {
     new: () => new ActivityService(Store.new())

@@ -19,20 +19,6 @@
       }
     }
   },
-  "caching": {
-    "caches": [
-      {
-        "store": "memory",
-        "max": 100,
-        "ttl": 300
-      }
-    ]
-  },
-  "access-code": {
-    "segments": 2,
-    "ttl-days": 7,
-    "max-retries": 1000
-  },
-  "cache-ttl-seconds": 300,
-  "cache-key-prefix": "activity_service"
+  "request_identity": { "entity": "application,type,name" },
+  "request_task": { "task": "type" }
 }

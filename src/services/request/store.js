@@ -10,7 +10,7 @@ const
     Request_Index = models.instance.Request_Index,
     _reservedQueryStrings = { limit: true, offset: true, operator: "GE" },
     _baseIndices = {state: true, task_id: true},
-    _notbaseIndices = {indices: true, foreignKeys: true, created: true, uuid: true};
+    _reservedProperties = { indices: true, foreignKeys: true, lastUpdated: true };
 
 const logger = log4js.getLogger('activity-service-store');
 
@@ -26,17 +26,14 @@ Store.prototype.get = async function (query) {
     let key_name = "";
     let key_value = "";
     let key_limit = "";
-    const operator = query["operator"] || _reservedQueryStrings["operator"];
-    let opLevel = 999;
-    
-    if (operator.startsWith("GE") || operator.startsWith("GT")) {
-        if (operator.length > 2) {
-            const level = operator.substring(2);
-            if (!isNaN(level)) {
-                opLevel = parseInt(level, 10);
-            }
-        }        
+    const opResult = getOperatorValue(query);
+
+    if (opResult.status) {
+        return opResult;
     }
+
+    const operator = opResult.operator;
+    const opLevel = parseInt(opResult.opLevel, 10);
 
     let level = 0;
     _.keysIn(query).forEach(key => {
@@ -61,11 +58,30 @@ Store.prototype.get = async function (query) {
     indexes.forEach(request => {
         uuids[request.uuid] = true;
     });
+
     const inClause = [];        
     for (let uuid in uuids) {
         inClause.push(Uuid.fromString(uuid));
     }
+
     return await Request.findAsync({uuid: { '$in': inClause }}, { consistency: models.consistencies.local_quorum });
+};
+
+function getOperatorValue(query) {
+    const operator = query["operator"] || _reservedQueryStrings["operator"];
+    let opLevel = 999;
+    
+    if (operator.startsWith("GE") || operator.startsWith("GT")) {
+        if (operator.length > 2) {
+            const level = operator.substring(2);
+            if (!isNaN(level)) {
+                opLevel = parseInt(level, 10);
+            }
+        }  
+        return { operator: operator, opLevel: opLevel}      
+    } 
+        
+    return { status: 400, message: "Invalid operator. Operator can be of format GE[0-9]+ or GT[0-9]+" };
 }
 
 Store.prototype.getByuuid = async function (uuid) {
@@ -390,8 +406,116 @@ Store.prototype.update = async function (after, uuid) {
     await models.doBatchAsync(queries);
 
     response.status = 200;
-    response.message = after;
+    response.message = "Updated request";
     return response;
+};
+
+Store.prototype.dropProperties = async function (body, query) {
+    logger.info("Store drop properties called");
+    const drop_data = JSON.parse(body.data || "{}");
+    const drop_properties = getProperties(drop_data);
+
+    logger.debug(`drop_properties: [${util.inspect(drop_properties)}]`);
+
+    if (Object.keys(drop_properties).length === 0) {
+        return { status: 400, message: "Data properties have to set for droppping" };
+    }
+
+    const requests = await this.get(query);
+
+    if (!Array.isArray(requests)) {
+        return requests;
+    }
+
+    const BreakException = {};
+    const ReserverdPropertyException = { message: "Reserved property in dropping data JSON." };
+
+    requests.forEach(request => {
+        const request_data = JSON.parse(request.data);
+        const request_properties = getProperties(request_data);        
+        const dropped_properties = {};
+
+        for (let property in request_properties) {
+            const parts = property.split('.');
+            let request_cursor = request_data;
+            let drop_cursor = drop_data;
+            let partial = "";
+
+            try {
+                parts.forEach(part => {
+                    partial += (partial === "") ? part : "." + part;
+                    const request_value = request_cursor[part];
+                    const drop_value = drop_cursor[part];
+
+                    logger.debug(`partial: [${partial}], request_value: [${util.inspect(request_value)}], drop_value: [${util.inspect(drop_value)}]`);
+
+                    if (drop_value) {
+                        if (typeof drop_value !== "object" && typeof request_value === "object" && !Array.isArray(request_value)) {
+                            if (_reservedProperties[partial]) {
+                                throw ReserverdPropertyException;                                
+                            }   
+                            delete request_value[drop_value]; 
+                            dropped_properties[partial + "." + drop_value] = true;
+                            throw BreakException;
+                        }
+
+                        if (Array.isArray(drop_value) && Array.isArray(request_value)) {
+                            drop_value.forEach(drop_item => {
+                                const index = request_value.indexOf(drop_item);
+                                if (index > -1) {
+                                    request_value.splice(index, 1);
+                                }    
+                            });
+                            throw BreakException;
+                        } 
+
+                        if (_reservedProperties[partial]) {
+                            throw ReserverdPropertyException;
+                        }
+
+                        if (typeof drop_value !== "object" ) {
+                            delete request_cursor[part];
+                            dropped_properties[partial] = true;
+                            throw BreakException;
+                        }
+
+                        request_cursor = request_value;
+                        drop_cursor = drop_value;
+                    }
+                });    
+            } catch (e) {
+                if (e !== BreakException) throw e;                
+            }
+        }
+
+        const indices = request_data["indices"];    
+        if (has_indices(indices)) {
+            for (let i = 0; i < indices.length; i++) {
+                const index = indices[i];
+                const parts = index.split(',');
+                for (let dropped_property in dropped_properties) {  
+                    let splicing = true;
+                    while (splicing) {
+                        splicing = false;
+                        for (let p = 0; p < parts.length; p++) {
+                            const part = parts[p];
+                            if (part === dropped_property || part.startsWith(dropped_property + ".")) {
+                                parts.splice(p, 1);
+                                splicing = true;
+                                break;
+                            }
+                        }
+                    }                  
+                }
+
+                indices[i] = parts.join(',');
+            }           
+        }
+
+        logger.debug(`request_data: [${util.inspect(request_data)}]`);
+    });
+
+    return { status: 200, message: "Properties have been dropped" };
 };
 
 function has_indices(indices) {
