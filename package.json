@@ -1,0 +1,50 @@
+{
+  "name": "activity_service",
+  "version": "0.1.0",
+  "description": "Activity Service",
+  "main": "index.js",
+  "scripts": {
+    "build": "# Nothing to build",
+    "start": "node src/server.js",
+    "lint": "./node_modules/.bin/eslint ./src",
+    "start:debug": "node --nolazy --inspect-brk=48572 src/server.js",
+    "test:debug": "mocha --exit --inspect-brk=48572",
+    "test:cov": "nyc mocha --timeout 200000 --exit",
+    "test": "./node_modules/.bin/eslint ./src && mocha --timeout 20000 --exit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com:JerryBirchler/activity_service.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bluebird": "^3.5.1",
+    "cache-manager": "^2.10.0",
+    "cache-manager-redis-store": "^1.5.0",
+    "cassandra-driver": "^3.5.0",
+    "config": "^1.30.0",
+    "express-cassandra": "^2.2.3",
+    "koa": "^2.5.2",
+    "koa-bodyparser": "^4.2.1",
+    "koa-router": "^7.4.0",
+    "koa2-swagger-ui": "^2.9.3",
+    "lodash": "^4.17.10",
+    "log4js": "^3.0.5",
+    "log4js-k8s": "^0.9.1",
+    "node-cache": "^4.2.0",
+    "node-persist": "^3.0.1",
+    "request": "^2.87.0",
+    "request-promise": "^4.2.4",
+    "uuid": "^3.3.2",
+    "uuid-validate": "0.0.3",
+    "validator": "^10.11.0"
+  },
+  "devDependencies": {
+    "eslint": "^5.4.0",
+    "mocha": "^5.2.0",
+    "nyc": "^13.0.1",
+    "superagent-defaults": "^0.1.14",
+    "supertest": "^3.1.0"
+  }
+}
