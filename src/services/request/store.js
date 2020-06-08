@@ -3,14 +3,13 @@ const
     util = require('util'),
     log4js = require('log4js'),
     _ = require('lodash'),
-    config = require('config')["access-code"],
     Uuid = require('cassandra-driver').types.Uuid,
     validate = require('uuid-validate'),
     Request = models.instance.Request,
     Request_Index = models.instance.Request_Index,
     _reservedQueryStrings = { limit: true, offset: true, operator: "GE" },
     _baseIndices = {state: true, task_id: true},
-    _reservedProperties = { indices: true, foreignKeys: true, lastUpdated: true };
+    _reservedProperties = { indices: true, foreignKeys: true, lastUpdated: true , current: true};
 
 const logger = log4js.getLogger('activity-service-store');
 
@@ -150,7 +149,7 @@ function buildKeys(request, indices, properties) {
     }
 
     if (errors) {
-        throw exception(`Errors building indices for request with uuid: [${uuid}]`);
+        throw {message: `Errors building indices for request with uuid: [${request.uuid}]`};
     }
 
     return keys;
@@ -192,7 +191,7 @@ function buildKey(request, index, properties) {
             } else if (properties[part]) {
                 errors = errors || buildValue(properties, part, batch);
             } else {
-                log.warn(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
+                logger.warn(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
                 errors = true;
             }                  
         }            
@@ -206,10 +205,12 @@ function buildValue(properties, part, batch) {
     const value = properties[part];
     if (value) {
         if (!Array.isArray(value)) {
-            batch.forEach(item => {
-                item.key_value += value;
-                item.key_value += '\u0000';    
-            });
+            if (part !== "current") {
+                batch.forEach(item => {
+                    item.key_value += value;
+                    item.key_value += '\u0000';    
+                });    
+            }
             return false;
         }
         if (value.length > 0) {            
@@ -231,7 +232,7 @@ function buildValue(properties, part, batch) {
         }
     } 
     const key_name = batch[0].key_name;
-    log.info(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
+    logger.warn(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
     return true;
 }
 
@@ -260,10 +261,64 @@ Store.prototype.new = async function (request) {
     const properties = getProperties(data);
     const indices = data.indices;
     const keys = buildKeys(request, indices, properties);    
+    const queries = [];
+
+    for (let i = 0; i < indices.length; i++) {
+        const index = indices[i];
+        const parts = index.split(',');
+        if (parts.includes("current")) {
+            let key_name = "";
+            let key_value = "";
+
+            parts.forEach(key => {
+                key_name += (key_name == "") ? key : "," + key;
+                if (key !== "current") {
+                    const value = properties[key];
+                    key_value += value;
+                    key_value += "\u0000";
+                    logger.debug(`key_value: ${key_value}`);
+                }
+            });
+
+            logger.debug(`key_name: [${key_name}], key_value: [${key_value}]`);
+            const request_index = await Request_Index.findOneAsync({ key_name, key_value: { '$gte': key_value }}, { consistency: models.consistencies.local_quorum });
+            const before = await Request.findOneAsync({ uuid: request_index.uuid}, { consistency: models.consistencies.local_quorum });
+            if (request_index) {
+                const uuid = request_index.uuid;
+                logger.debug(`uuid: ${uuid}`);        
+                queries.push(new Request_Index({
+                    key_name: request_index.key_name,
+                    key_value: request_index.key_value,
+                    created: request_index.created,
+                    uuid: request_index.uuid
+                }).delete({ return_query: true }));
+                
+                const before = await Request.findOneAsync({ uuid: request_index.uuid}, { consistency: models.consistencies.local_quorum });
+                if (before) {
+                    const before_data = JSON.parse(before.data || "{}");
+                    if (before_data.current) {
+                        before_data.current = false;
+                    }
+                    before.data = JSON.stringify(before_data);
+                    queries.push(new Request({
+                        uuid: before.uuid,
+                        method: before.method,
+                        url: before.url,
+                        headers: before.headers,
+                        body: before.body,
+                        data: before.data,
+                        display_message: before.display_message,
+                        state: before.state,
+                        task_id: before.task_id,
+                        created: before.created                                
+                    }).save({ return_query: true }));       
+                }
+            }
+        }
+    }
     
     logger.debug(`keys: [${util.inspect(keys)}]`);    
 
-    const queries = [];
     queries.push(new Request({
         uuid: Uuid.fromString(request.uuid),
         method: request.method,
