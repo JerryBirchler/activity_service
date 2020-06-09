@@ -45,6 +45,18 @@ Store.prototype.get = async function (query) {
             const value = query[key];
             key_value += value;
             key_value += "\u0000";
+            ///
+            /// This concept allows for queries to be limited to supplied key values so that 
+            /// I could for example get all entity.name(s) for entity.type="Oracle" without
+            /// worrying about spill over into the next type which may be "SQLServer". If the
+            /// operation level is set to zero, then none of the results are limited by the key 
+            /// values supplied. Whereas in the case presented above, if in that case the top level 
+            /// index part was entity.type, then an operation level of one would in fact limit 
+            /// the results to let's say "Oracle". This is intended to provide some flexibility
+            /// to filter queried results for perhaps a UI display of a list of entities based 
+            /// on some criteria. The default operation level is 999, which essentially means that
+            /// results are limited to matching all the key values supplied.
+            ///
             key_limit += (opLevel > level) ? value : "\uFFFF";
             key_limit += "\uFFFF";
             level++;
@@ -52,23 +64,36 @@ Store.prototype.get = async function (query) {
     });
 
     logger.debug(`Store get key_name: [${key_name}], key_value: [${key_value}], key_limit[${key_limit}], opLevel: [${opLevel}]`);
-    const uuids = {}
+    const uuids = {};
     const indexes = operator.startsWith("GE") 
         ? await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum })
         : await Request_Index.findAsync({ key_name, key_value: { '$gt': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum });
 
-    indexes.forEach(request => {
-        uuids[request.uuid] = true;
-    });
+    ///
+    /// Create a unique hash set of all the uuids returned to pair down request queries
+    ///        
+    indexes.forEach(request => { uuids[request.uuid] = true; });
 
+    ///
+    /// Let's batch up all the UUIDs from the index results so that we can get all the requests that 
+    /// match. We may need to throttle this if the request payload exceeds some threshold that breaks 
+    /// Cassandra Express calls or  because we might want to throttle the number of requests returned
+    ///
     const inClause = [];        
-    for (let uuid in uuids) {
-        inClause.push(Uuid.fromString(uuid));
-    }
-
+    for (let uuid in uuids) { inClause.push(Uuid.fromString(uuid)); }
     return await Request.findAsync({uuid: { '$in': inClause }}, { consistency: models.consistencies.local_quorum });
 };
 
+///
+/// This gets the operator value and level for a index query
+/// Operator values are limited to GE for greater than or equal to and GT for greater than
+/// Operator level is any integer 0 through 999. This parameter is meant to limit results on 
+/// a key part to its key value based on its index + 1 into the composite index. For example, 
+/// if the composite key is entity.application,entity.type,entity.name and the operation level 
+/// is set to 2, then if we are querying for 'Demo\u0000\Oracle\u0000\dfw01ora001\u0000', we can
+/// expect to get results limited to entity.type="Oracle" even though "SQLServer" might be the 
+/// next key value ahead of "Oracle".
+///
 function getOperatorValue(query) {
     const operator = query["operator"] || _reservedQueryStrings["operator"];
     let opLevel = 999;
@@ -109,9 +134,9 @@ Store.prototype.getByuuid = async function (uuid) {
 };
 
 /// The properties collection accounts for each value level property in the data JSON payload.
-/// A value level property is one whose value is a primative or Array List.
-/// the access to a property uses a DOT notation to account for each level of hierarchy seen in the 
-/// JSON payload. For example given the application key below, the property would be "entity.application":
+/// A value level property is one whose value is a primative type or Array List. The access to 
+/// a property uses a DOT notation to account for each level of hierarchy seen in the JSON payload. 
+/// For example given the application key below, the property would be "entity.application":
 ///
 ///     {
 ///         "entity": {
@@ -119,8 +144,9 @@ Store.prototype.getByuuid = async function (uuid) {
 ///         }
 ///     }
 ///
-/// This properties list is meant to facilitate various merge operations for updating the data JSON
-/// in a simple manner.
+/// This properties list is meant to facilitate various operations needed to validate index parts
+/// and supply values where needed.
+///
 function getProperties(data) {
     const properties = {}; 
     for (let key in data) {
@@ -133,21 +159,44 @@ function getProperties(data) {
 
     return properties;
     
-    function getChildren(properties, stem, hook, key) {;
+    ///
+    /// properties is our hash set of property names with corresponding values
+    ///
+    /// partial represents the descendant path of a partially qualified property name 
+    /// as we descend into its parts, or it may in fact be the fully qualified property.
+    ///
+    /// cursor for lack of a better term is the object reference holding the descendent 
+    /// properties that are at the same partial property name level as we recurse.
+    ///
+    /// key is the current key sampled to see what sort of object type it is
+    ///
+    function getChildren(properties, partial, cursor, key) {;
+        ///
+        /// A key will be a number when it is an index into an array
+        ///
         if (isNaN(key)) {
-            stem = (stem === null) ? key : stem + "." + key;
+            partial = (partial === null) ? key : partial + "." + key;
         } 
-        if (typeof hook === "object") {
-            for (let child in hook) {
-                getChildren(properties, stem, hook[child], child);
+        if (typeof cursor === "object") {
+            ///
+            /// If the current cursor is an object it has descendent parts
+            /// BTW, an array is also considered an Object, this is why we
+            /// check keys to see if they are not a number as we recurse.
+            ///
+            for (let child in cursor) {
+                getChildren(properties, partial, cursor[child], child);
             }
         } else if (isNaN(key)) {
-            properties[stem] = hook;
+            properties[partial] = cursor;
         } else {
+            ///
+            /// This is that special case where the key is actually just an index 
+            /// in an array
+            ///
             if (key == 0) {
-                properties[stem] = [];    
+                properties[partial] = [];    
             }
-            properties[stem][key] = hook;
+            properties[partial][key] = cursor;
         }
     }    
 }
@@ -634,8 +683,11 @@ Store.prototype.dropProperties = async function (body, query) {
                         for (let p = 0; p < parts.length; p++) {
                             const part = parts[p];
                             ///
-                            /// remove the dropped property and any of its descendents
-                            /// short circuit if there are no more properties to drop
+                            /// Remove the dropped property and any of its descendents.
+                            /// Short circuit the "while" loop if there are no more properties 
+                            /// to drop. Let's not try to be tricky here. If we splice at least 
+                            /// once then let's break and just go through the remaining parts 
+                            /// all over again to keep the splicing logic simple.
                             ///
                             if (part === dropped_property || part.startsWith(dropped_property + ".")) {
                                 parts.splice(p, 1);
