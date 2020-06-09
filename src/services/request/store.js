@@ -303,59 +303,7 @@ Store.prototype.new = async function (request) {
         const parts = index.split(',');
 
         if (parts.includes("current")) {
-            let key_name = "";
-            let key_value = "";
-
-            parts.forEach(key => {
-                key_name += (key_name == "") ? key : "," + key;
-                if (key !== "current") {
-                    const value = properties[key];
-                    key_value += value;
-                    key_value += "\u0000";
-                    logger.debug(`Store new key_value: ${key_value}`);
-                }
-            });
-
-            logger.debug(`Store new request_index key_name: [${key_name}], key_value: [${key_value}]`);
-            const request_index = await Request_Index.findOneAsync({ key_name, key_value: { '$eq': key_value }}, { consistency: models.consistencies.local_quorum });
-            if (request_index) {
-                const before = await Request.findOneAsync({ uuid: request_index.uuid}, { consistency: models.consistencies.local_quorum });
-                
-                if (before) {
-                    const uuid = request_index.uuid;
-                    logger.debug(`Store new uuid: ${uuid}`);                            
-                    const before_data = JSON.parse(before.data || "{}");
-                    
-                    if (before_data.current) {
-                        before_data.current = false;
-                        before.data = JSON.stringify(before_data);
-                    }
-                    ///
-                    /// Delete the index for what was the current record
-                    ///
-                    queries.push(new Request_Index({
-                        key_name: request_index.key_name,
-                        key_value: request_index.key_value,
-                        created: request_index.created,
-                        uuid: request_index.uuid
-                    }).delete({ return_query: true }));
-                    ///
-                    /// Update the former request to no longer show as current
-                    ///
-                    queries.push(new Request({
-                        uuid: before.uuid,
-                        method: before.method,
-                        url: before.url,
-                        headers: before.headers,
-                        body: before.body,
-                        data: before.data,
-                        display_message: before.display_message,
-                        state: before.state,
-                        task_id: before.task_id,
-                        created: before.created                                
-                    }).save({ return_query: true }));       
-                }
-            }
+            await handleCurrentIndex(properties, parts, queries);
         }
     }
     
@@ -380,6 +328,63 @@ Store.prototype.new = async function (request) {
     response.status = 201;
     response.message = "Created new request";
     return response;
+};
+
+async function handleCurrentIndex(properties, parts, queries) {
+    let key_name = "";
+    let key_value = "";
+
+    parts.forEach(key => {
+        key_name += (key_name === "") ? key : "," + key;
+        if (key !== "current") {
+            const value = properties[key];
+            key_value += value;
+            key_value += "\u0000";
+            logger.debug(`handleCurrentIndex key_value: ${key_value}`);
+        }
+    });
+
+    logger.debug(`handleCurrentIndex request_index key_name: [${key_name}], key_value: [${key_value}]`);
+    const request_index = await Request_Index.findOneAsync({ key_name, key_value: { '$eq': key_value }}, { consistency: models.consistencies.local_quorum });
+    
+    if (request_index) {
+        const before = await Request.findOneAsync({ uuid: request_index.uuid}, { consistency: models.consistencies.local_quorum });
+        
+        if (before) {
+            const uuid = request_index.uuid;
+            logger.debug(`handleCurrentIndex uuid: ${uuid}`);                            
+            const before_data = JSON.parse(before.data || "{}");
+            
+            if (before_data.current) {
+                before_data.current = false;
+                before.data = JSON.stringify(before_data);
+            }
+            ///
+            /// Delete the index for what was the current record
+            ///
+            queries.push(new Request_Index({
+                key_name: request_index.key_name,
+                key_value: request_index.key_value,
+                created: request_index.created,
+                uuid: request_index.uuid
+            }).delete({ return_query: true }));
+            ///
+            /// Update the former request to no longer show as current
+            ///
+            queries.push(new Request({
+                uuid: before.uuid,
+                method: before.method,
+                url: before.url,
+                headers: before.headers,
+                body: before.body,
+                data: before.data,
+                display_message: before.display_message,
+                state: before.state,
+                task_id: before.task_id,
+                created: before.created                                
+            }).save({ return_query: true }));       
+        }
+    }
 };
 
 Store.prototype.update = async function (after, uuid) {
