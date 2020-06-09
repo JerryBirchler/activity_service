@@ -9,7 +9,10 @@ const
     Request_Index = models.instance.Request_Index,
     _reservedQueryStrings = { limit: true, offset: true, operator: "GE" },
     _baseIndices = {state: true, task_id: true},
-    _reservedProperties = { indices: true, foreignKeys: true, lastUpdated: true , current: true};
+    _reservedProperties = { indices: true, foreignKeys: true, lastUpdated: true , current: true},
+    BreakException = {},
+    IncompatibleTypesException = { message: "Incompatible type merging data JSON." },
+    ReserverdPropertyException = {};                                
 
 const logger = log4js.getLogger('activity-service-store');
 
@@ -105,6 +108,19 @@ Store.prototype.getByuuid = async function (uuid) {
     return result;
 };
 
+/// The properties collection accounts for each value level property in the data JSON payload.
+/// A value level property is one whose value is a primative or Array List.
+/// the access to a property uses a DOT notation to account for each level of hierarchy seen in the 
+/// JSON payload. For example given the application key below, the property would be "entity.application":
+///
+///     {
+///         "entity": {
+///             "application": "demo"
+///         }
+///     }
+///
+/// This properties list is meant to facilitate various merge operations for updating the data JSON
+/// in a simple manner.
 function getProperties(data) {
     const properties = {}; 
     for (let key in data) {
@@ -155,6 +171,9 @@ function buildKeys(request, indices, properties) {
     return keys;
 }
 
+///
+/// This completes the key values and pushes them into an array of keys for batch proccessing
+///
 function buildKeyObject(request, batch, keys) {
     if (batch) {
         batch.forEach(item => {
@@ -167,6 +186,9 @@ function buildKeyObject(request, batch, keys) {
     return true;    
 }
 
+///
+/// This creates the composite key values separating parts with a zero character code
+///
 function buildKey(request, index, properties) {
     const key_name = index;
     let errors = false;
@@ -185,6 +207,10 @@ function buildKey(request, index, properties) {
                 logger.debug(`item: [${util.inspect(item)}]`);
             });
         } else {
+            ///
+            /// This is how to access a data key that has the same name as a field
+            /// in the normal schema
+            ///
             if (part.startsWith("data.")) {
                 const subpart = part.substring(5);
                 errors = errors || buildValue(properties, subpart, batch);
@@ -263,10 +289,19 @@ Store.prototype.new = async function (request) {
     const keys = buildKeys(request, indices, properties);    
     const queries = [];
 
+    ///
+    /// Loop through all of the composite indexes and batch up queries to insert them. 
+    /// When the composite index contains "current", make sure to chase down the former 
+    /// current index for this entity, remove it and update that request to show 
+    /// "current": false. This is done so that with a properly formatted query it should
+    /// be possible to get an inventory of all current requests by individual entities 
+    /// That should be sufficient to merge request status information into a grid control 
+    /// in any UI that displays entities.
+    ///
     for (let i = 0; i < indices.length; i++) {
         const index = indices[i];
         const parts = index.split(',');
-        
+
         if (parts.includes("current")) {
             let key_name = "";
             let key_value = "";
@@ -413,27 +448,30 @@ Store.prototype.update = async function (after, uuid) {
     // merge data from before and after and add lastUpdated
     //======================================================
     const data = before_data;
+    
     for (let property in after_properties) {
         logger.debug(`Store update property: [${property}]`);
         const parts = property.split('.');
         try {
             let data_cursor = data;
             let after_cursor = after_data;
-            var BreakException = {};
-            var IncompatibleTypesException = { message: "Incompatible type merging data JSON." };
             parts.forEach(part => {
                 if (!data_cursor[part])  {
                     data_cursor[part] = after_cursor[part];
                     throw BreakException;
                 }      
+
                 data_cursor = data_cursor[part];
                 after_cursor = after_cursor[part];
+
                 if (typeof data_cursor !== typeof after_cursor) {
                     throw IncompatibleTypesException;
                 }
+
                 if (Array.isArray(data_cursor) !== Array.isArray(after_cursor)) {
                     throw IncompatibleTypesException;
                 }
+
                 if (Array.isArray(data_cursor)) {
                     after_cursor.forEach(item => {
                         if (!data_cursor.includes(item)) {
@@ -441,7 +479,8 @@ Store.prototype.update = async function (after, uuid) {
                         }
                     });
                     throw BreakException;
-                } 
+                }
+
                 if (typeof Array.data_cursor !== "object" ) {
                     data_cursor = after_cursor;
                     throw BreakException;
@@ -465,13 +504,20 @@ Store.prototype.update = async function (after, uuid) {
         task_id: after.task_id,
         created: after.created
     }).save({ return_query: true }));
+    
     await models.doBatchAsync(queries);
-
     response.status = 200;
     response.message = "Updated request";
     return response;
 };
 
+///
+/// Dropping properties literally translates into removal of those properties and their descendents
+/// from the JSON payload of the data field for every request returned by the query string provided.
+/// It also means that any index referencing a dropped property has to be adjusted to no longer use
+/// that property or its descendents. This also implies that the former index needs to be deleted 
+/// and that the adjusted index needs to be inserted.
+///
 Store.prototype.dropProperties = async function (body, query) {
     logger.info("Store drop properties called");
     const drop_data = JSON.parse(body.data || "{}");
@@ -483,14 +529,17 @@ Store.prototype.dropProperties = async function (body, query) {
         return { status: 400, message: "Data properties have to set for droppping" };
     }
 
+    ///
+    /// This uses the query string approach to gathering all the requests we want to drop properties from
+    ///
     const requests = await this.get(query);
 
+    ///
+    /// If the return value is not an array, it indicates some sort of failure
+    ///
     if (!Array.isArray(requests)) {
         return requests;
     }
-
-    const BreakException = {};
-    const ReserverdPropertyException = { message: "Reserved property in dropping data JSON." };
 
     requests.forEach(request => {
         const request_data = JSON.parse(request.data);
@@ -516,6 +565,7 @@ Store.prototype.dropProperties = async function (body, query) {
                             if (_reservedProperties[partial]) {
                                 throw ReserverdPropertyException;                                
                             }   
+
                             delete request_value[drop_value]; 
                             dropped_properties[partial + "." + drop_value] = true;
                             throw BreakException;
@@ -524,10 +574,12 @@ Store.prototype.dropProperties = async function (body, query) {
                         if (Array.isArray(drop_value) && Array.isArray(request_value)) {
                             drop_value.forEach(drop_item => {
                                 const index = request_value.indexOf(drop_item);
+                                
                                 if (index > -1) {
                                     request_value.splice(index, 1);
                                 }    
                             });
+
                             throw BreakException;
                         } 
 
@@ -550,19 +602,39 @@ Store.prototype.dropProperties = async function (body, query) {
             }
         }
 
+        ///
+        /// Remove parts of any composite indexes where a property or its descendents are being dropped
+        /// For example, consider this the before composite index: 
+        ///     entity.type,entity.name,entity.options
+        /// 
+        /// if we are dropping the entity.options property then the above index is adjusted as follows:
+        ///     entity.type,entity.name
+        ///
         const indices = request_data["indices"];    
         if (has_indices(indices)) {
+            ///
+            /// we canot use a forEach lambda here because we may have to rebuild the index content
+            ///
             for (let i = 0; i < indices.length; i++) {
                 const index = indices[i];
                 const parts = index.split(',');
+                let alteredParts = false;
+
                 for (let dropped_property in dropped_properties) {  
                     let splicing = true;
+
                     while (splicing) {
                         splicing = false;
+
                         for (let p = 0; p < parts.length; p++) {
                             const part = parts[p];
+                            ///
+                            /// remove the dropped property and any of its descendents
+                            /// short circuit if there are no more properties to drop
+                            ///
                             if (part === dropped_property || part.startsWith(dropped_property + ".")) {
                                 parts.splice(p, 1);
+                                alteredParts = true;
                                 splicing = true;
                                 break;
                             }
@@ -570,7 +642,9 @@ Store.prototype.dropProperties = async function (body, query) {
                     }                  
                 }
 
-                indices[i] = parts.join(',');
+                if (alteredParts) {
+                    indices[i] = parts.join(',');   
+                }
             }           
         }
 
