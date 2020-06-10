@@ -10,17 +10,23 @@ const
     _reservedQueryStrings = { limit: true, offset: true, operator: "GE" },
     _baseIndices = {state: true, task_id: true},
     _reservedProperties = { indices: true, foreignKeys: true, lastUpdated: true , current: true},
-    BreakException = {},
-    IncompatibleTypesException = { message: "Incompatible type merging data JSON." },
-    ReserverdPropertyException = {};                                
+    _requiredProperties = {},
+    BreakException = function() { return new Error("break")},
+    IncompatibleTypesException = function() { return new Error("Incompatible type merging data JSON")},
+    ReserverdPropertyException = function(key) { return new Error(`Reserved property: [${key}] is not allowed`) },                              
+    MissingRequiredPropertyException = function(key) { return new Error(`Required property: [${key}] is missing`) };                                 
 
 const logger = log4js.getLogger('activity-service-store');
 
 function Store() {
 }
 
-Store.prototype.init = async function () {
-    logger.info("Store init called");
+Store.prototype.init = async function (config) {
+    logger.info(`Store init`);
+    const required = config["required_request_properties"] || ["entity.application", "entity.type", "entity.name", "task.type", "current"];
+    required.forEach(property => {
+        _requiredProperties[property] = true;
+    });        
 };
 
 Store.prototype.get = async function (query) {
@@ -147,13 +153,22 @@ Store.prototype.getByuuid = async function (uuid) {
 /// This properties list is meant to facilitate various operations needed to validate index parts
 /// and supply values where needed.
 ///
-function getProperties(data) {
+function getProperties(data, checkRequired) {
     const properties = {}; 
     for (let key in data) {
         getChildren(properties, null, data[key], key);
     }
+
+    if (checkRequired) {
+        for (let key in _requiredProperties) {
+            logger.debug(`getProperties required key: [${key}]`);
+            if (!properties[key]) {
+                throw new MissingRequiredPropertyException(key);
+            }
+        }
+    }
     
-    for (let key in properties) {
+    for (let key in properties) {        
         logger.debug(`property key: [${key}], value: [${properties[key]}]`);
     }
 
@@ -333,7 +348,14 @@ Store.prototype.new = async function (request) {
     request.created = request.created || new Date().toISOString();
 
     const data = JSON.parse(request.data);
-    const properties = getProperties(data);
+    let properties;
+    try {
+        properties = getProperties(data, true);
+    } catch (e) {
+        response.status = 400;
+        response.message = e.message;
+        return response;
+    }
     const indices = data.indices;
     const keys = buildKeys(request, indices, properties);    
     const queries = [];
@@ -464,8 +486,9 @@ Store.prototype.update = async function (after, uuid) {
     after_data.lastUpdated = after_data.lastUpdated || new Date().toISOString();
 
     const before_data = JSON.parse(before.data);
-    const after_properties = getProperties(after_data);
-    const before_properties = getProperties(before_data);
+    
+    const after_properties = getProperties(after_data, false);
+    const before_properties = getProperties(before_data, false);
     const queries = [];
 
     //========================================
@@ -512,18 +535,18 @@ Store.prototype.update = async function (after, uuid) {
             parts.forEach(part => {
                 if (!data_cursor[part])  {
                     data_cursor[part] = after_cursor[part];
-                    throw BreakException;
+                    throw new BreakException();
                 }      
 
                 data_cursor = data_cursor[part];
                 after_cursor = after_cursor[part];
 
                 if (typeof data_cursor !== typeof after_cursor) {
-                    throw IncompatibleTypesException;
+                    throw new IncompatibleTypesException();
                 }
 
                 if (Array.isArray(data_cursor) !== Array.isArray(after_cursor)) {
-                    throw IncompatibleTypesException;
+                    throw new IncompatibleTypesException();
                 }
 
                 if (Array.isArray(data_cursor)) {
@@ -532,12 +555,12 @@ Store.prototype.update = async function (after, uuid) {
                             data_cursor.push(item);
                         }
                     });
-                    throw BreakException;
+                    throw new BreakException();
                 }
 
                 if (typeof Array.data_cursor !== "object" ) {
                     data_cursor = after_cursor;
-                    throw BreakException;
+                    throw new BreakException();
                 }
             });
         } catch(e) {
@@ -575,12 +598,18 @@ Store.prototype.update = async function (after, uuid) {
 Store.prototype.dropProperties = async function (body, query) {
     logger.info("Store drop properties called");
     const drop_data = JSON.parse(body.data || "{}");
-    const drop_properties = getProperties(drop_data);
+    const drop_properties = getProperties(drop_data, false);
 
     logger.debug(`drop_properties: [${util.inspect(drop_properties)}]`);
 
     if (Object.keys(drop_properties).length === 0) {
-        return { status: 400, message: "Data properties have to set for droppping" };
+        return { status: 400, message: "Data properties have to be set for droppping" };
+    }
+
+    for (let key in drop_properties) {
+        if (_requiredProperties[key]) {
+            return { status: 400, message: `Cannot drop required property: [${key}]` };
+        }
     }
 
     ///
@@ -597,7 +626,7 @@ Store.prototype.dropProperties = async function (body, query) {
 
     requests.forEach(request => {
         const request_data = JSON.parse(request.data);
-        const request_properties = getProperties(request_data);        
+        const request_properties = getProperties(request_data, false);        
         const dropped_properties = {};
 
         for (let property in request_properties) {
@@ -617,12 +646,12 @@ Store.prototype.dropProperties = async function (body, query) {
                     if (drop_value) {
                         if (typeof drop_value !== "object" && typeof request_value === "object" && !Array.isArray(request_value)) {
                             if (_reservedProperties[partial]) {
-                                throw ReserverdPropertyException;                                
+                                throw new ReserverdPropertyException(partial);                                
                             }   
 
                             delete request_value[drop_value]; 
                             dropped_properties[partial + "." + drop_value] = true;
-                            throw BreakException;
+                            throw new BreakException();
                         }
 
                         if (Array.isArray(drop_value) && Array.isArray(request_value)) {
@@ -634,17 +663,17 @@ Store.prototype.dropProperties = async function (body, query) {
                                 }    
                             });
 
-                            throw BreakException;
+                            throw new BreakException();
                         } 
 
                         if (_reservedProperties[partial]) {
-                            throw ReserverdPropertyException;
+                            throw new ReserverdPropertyException(partial);
                         }
 
                         if (typeof drop_value !== "object" ) {
                             delete request_cursor[part];
                             dropped_properties[partial] = true;
-                            throw BreakException;
+                            throw new BreakException();
                         }
 
                         request_cursor = request_value;

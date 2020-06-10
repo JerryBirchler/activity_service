@@ -3,6 +3,7 @@
 const
     Router = require('koa-router'),
     bodyParser = require('koa-bodyparser'),
+    config = require('config'),
     Store = require('./store'),
     log4js = require('log4js'),
     util = require('util'),
@@ -17,7 +18,7 @@ class ActivityService {
     }
 
     async init() {
-        await this._store.init();        
+        await this._store.init(config);        
         const routerOptions = { prefix: "/request" };
         const parser = bodyParser();
         const router = new Router(routerOptions);
@@ -57,11 +58,13 @@ class ActivityService {
         ctx.assert(ctx.request.body.url, 400, "'url' field is missing.");
         ctx.assert(ctx.request.body.task_id, 400, "'task_id' field is missing.");
 
-        logger.debug(`Saving new request: ${util.inspect(ctx.response.body)}`);
-
         // Save and return it
         const response = await this._store.new(ctx.request.body);
-        logger.debug(`response: ${response}`);
+        if (response.status / 100 !== 2) {
+            logger.info(`saveRequest uuid: [${ctx.request.body.uuid}] status: [${response.status}], message: [${response.message}]`);
+        } else {
+            logger.info(`saveRequest uuid: [${ctx.request.body.uuid}] status: [${response.status}]`);
+        }
         ctx.response.body = response.message;
         ctx.status = response.status;
         return ctx.response.body;
@@ -98,7 +101,6 @@ class ActivityService {
         return ctx.response.body;
     }
 }
-
 
 module.exports = {
     new: () => new ActivityService(Store.new())
