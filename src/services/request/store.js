@@ -773,7 +773,7 @@ Store.prototype.dropProperties = async function (body, query) {
   
         /// append all the update queries and indexes
         ///
-        queries.push(...await this.update(request, request.uuid, before));        
+        queries.push(...await this.update(after, after.uuid, before));        
     }
 
     await models.doBatchAsync(queries);
