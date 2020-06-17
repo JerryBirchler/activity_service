@@ -1,3 +1,5 @@
+const { request } = require('http');
+
 const
     models = require('express-cassandra'),
     util = require('util'),
@@ -458,16 +460,16 @@ async function handleCurrentIndex(properties, parts, queries) {
     }
 };
 
-Store.prototype.update = async function (after, uuid) {
+Store.prototype.update = async function (after, uuid, before) {
     logger.info("Store update called");
-    response = JSON.parse("{}")
-    const before = await this.getByuuid(uuid);
+    response = JSON.parse("{}");
+    const return_queries = before ? true : false;
+    before = before || await this.getByuuid(uuid);
     
     if (!before) {
         response.status = 409;
         response.message = "Update existing request failed: does not exist";
-        return response;
-    
+        return response;    
     }
 
     after.uuid = uuid;
@@ -582,6 +584,9 @@ Store.prototype.update = async function (after, uuid) {
         created: after.created
     }).save({ return_query: true }));
     
+    if (return_queries) {
+        return queries;
+    }
     await models.doBatchAsync(queries);
     response.status = 200;
     response.message = "Updated request";
@@ -625,7 +630,8 @@ Store.prototype.dropProperties = async function (body, query) {
     }
 
     requests.forEach(request => {
-        const request_data = JSON.parse(request.data);
+        request.before = request.data;
+        const request_data = JSON.parse(request.data);        
         const request_properties = getProperties(request_data, false);        
         const dropped_properties = {};
 
@@ -681,7 +687,9 @@ Store.prototype.dropProperties = async function (body, query) {
                     }
                 });    
             } catch (e) {
-                if (e !== BreakException) throw e;                
+                if (e !== BreakException) {
+                    return { "status": 400, "message": e.message };
+                }                
             }
         }
 
@@ -734,10 +742,42 @@ Store.prototype.dropProperties = async function (body, query) {
             }           
         }
 
+        ///
+        /// Do a final check to see if we have retained all our required prorperties
+        ///
+        try {
+            getProperties(request_data, true);        
+        } catch (e) {
+            return { "status": 400, "message": e.message };
+        }
+
         logger.debug(`request_data: [${util.inspect(request_data)}]`);
     });
 
-    return { status: 200, message: "Properties have been dropped" };
+    const queries = [];
+    for (let after in requests) {
+        const before_data = after.before_data || "{}";
+        delete after.before_data;
+        const before = { 
+            uuid: after.uuid,
+            method: after.method,
+            url: after.url,
+            headers: after.headers,
+            body: after.body,
+            data: before_data,
+            display_message: after.display_message,
+            state: after.state,
+            task_id: after.task_id,
+            created: after.created                  
+        };
+  
+        /// append all the update queries and indexes
+        ///
+        queries.push(...await this.update(request, request.uuid, before));        
+    }
+
+    await models.doBatchAsync(queries);
+    return { status: 200, message: "Properties have been dropped, and any indexes have been rebuilt" };
 };
 
 function has_indices(indices) {

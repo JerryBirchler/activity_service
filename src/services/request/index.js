@@ -80,7 +80,13 @@ class ActivityService {
 
         // Save and return it
         const response = await this._store.update(ctx.request.body, ctx.params.uuid);
-        logger.debug(`response: ${response}`);
+
+        if (response.status / 100 !== 2) {
+            logger.info(`updateRequest uuid: [${ctx.request.body.uuid}] status: [${response.status}], message: [${response.message}]`);
+        } else {
+            logger.info(`updateRequest uuid: [${ctx.request.body.uuid}] status: [${response.status}]`);
+        }
+
         ctx.response.body = response.message;
         ctx.status = response.status;
         return ctx.response.body;
