@@ -89,33 +89,6 @@ Store.prototype.get = async function (query) {
     return await Request.findAsync({uuid: { '$in': inClause }}, { consistency: models.consistencies.local_quorum });
 };
 
-///
-/// This gets the operator value and level for a index query
-/// Operator values are limited to GE for greater than or equal to and GT for greater than
-/// Operator level is any integer 0 through 999. This parameter is meant to limit results on 
-/// a key part to its key value based on its index + 1 into the composite index. For example, 
-/// if the composite key is entity.application,entity.type,entity.name and the operation level 
-/// is set to 2, then if we are querying for 'Demo\u0000\Oracle\u0000\dfw01ora001\u0000', we can
-/// expect to get results limited to entity.type="Oracle" even though "SQLServer" might be the 
-/// next key value ahead of "Oracle".
-///
-function getOperatorValue(query) {
-    const operator = query["operator"] || _reservedQueryStrings["operator"];
-    let opLevel = 999;
-    
-    if (operator.startsWith("GE") || operator.startsWith("GT")) {
-        if (operator.length > 2) {
-            const level = operator.substring(2);
-            if (!isNaN(level)) {
-                opLevel = parseInt(level, 10);
-            }
-        }  
-        return { operator: operator, opLevel: opLevel}      
-    } 
-        
-    return { status: 400, message: "Invalid operator. Operator can be of format GE[0-9]+ or GT[0-9]+" };
-}
-
 Store.prototype.getByuuid = async function (uuid) {
     logger.info("Store getByuuid called");
     if (!uuid) return;
@@ -138,193 +111,6 @@ Store.prototype.getByuuid = async function (uuid) {
     result.last_write_on_display_message = request.last_write_on_display_message;
     return result;
 };
-
-/// The properties collection accounts for each value level property in the data JSON payload.
-/// A value level property is one whose value is a primative type or Array List. The access to 
-/// a property uses a DOT notation to account for each level of hierarchy seen in the JSON payload. 
-/// For example given the application key below, the property would be "entity.application":
-///
-///     {
-///         "entity": {
-///             "application": "demo"
-///         }
-///     }
-///
-/// This properties list is meant to facilitate various operations needed to validate index parts
-/// and supply values where needed.
-///
-function getProperties(data, checkRequired) {
-    const properties = {}; 
-    for (let key in data) {
-        getChildren(properties, null, data[key], key);
-    }
-
-    if (checkRequired) {
-        for (let key in _requiredProperties) {
-            logger.debug(`getProperties required key: [${key}]`);
-            if (!properties[key]) {
-                throw new _ex.MissingRequiredPropertyException(key);
-            }
-        }
-    }
-    
-    for (let key in properties) {        
-        logger.debug(`property key: [${key}], value: [${properties[key]}]`);
-    }
-
-    return properties;
-    
-    ///
-    /// properties is our hash set of property names with corresponding values
-    ///
-    /// partial represents the descendant path of a partially qualified property name 
-    /// as we descend into its parts, or it may in fact be the fully qualified property.
-    ///
-    /// cursor for lack of a better term is the object reference holding the descendent 
-    /// properties that are at the same partial property name level as we recurse.
-    ///
-    /// key is the current key sampled to see what sort of object type it is
-    ///
-    function getChildren(properties, partial, cursor, key) {;
-        ///
-        /// A key will be a number when it is an index into an array
-        ///
-        if (isNaN(key)) {
-            partial = (partial === null) ? key : partial + "." + key;
-        } 
-        if (typeof cursor === "object") {
-            ///
-            /// If the current cursor is an object it has descendent parts
-            /// BTW, an array is also considered an Object, this is why we
-            /// check keys to see if they are not a number as we recurse.
-            ///
-            for (let child in cursor) {
-                getChildren(properties, partial, cursor[child], child);
-            }
-        } else if (isNaN(key)) {
-            properties[partial] = cursor;
-        } else {
-            ///
-            /// This is that special case where the key is actually just an index 
-            /// in an array
-            ///
-            if (key == 0) {
-                properties[partial] = [];    
-            }
-            properties[partial][key] = cursor;
-        }
-    }    
-}
-
-function buildKeys(request, indices, properties) {
-    const keys = [];
-    let errors = false;
-
-    if (has_indices(indices)) { 
-        indices.forEach(index => {
-            const batch = buildKey(request, index, properties);
-            const interimError = buildKeyObject(request, batch, keys);
-            errors = errors || interimError;
-        });
-    }
-
-    if (errors) {
-        throw {message: `Errors building indices for request with uuid: [${request.uuid}]`};
-    }
-
-    return keys;
-}
-
-///
-/// This completes the key values and pushes them into an array of keys for batch proccessing
-///
-function buildKeyObject(request, batch, keys) {
-    if (batch) {
-        batch.forEach(item => {
-            logger.debug(`item: [${util.inspect(item)}]`);
-            keys.push({ key_name: item.key_name, key_value: item.key_value, created: request.created, uuid: Uuid.fromString(request.uuid) });            
-        });   
-        return false 
-    } 
-
-    return true;    
-}
-
-///
-/// This creates the composite key values separating parts with a zero character code
-///
-function buildKey(request, index, properties) {
-    const key_name = index;
-    let errors = false;
-    let key_value = "";
-    const key = { key_name: key_name, key_value: key_value };
-    const batch = [ key ];
-    const parts = index.split(',');
-    logger.debug(`index: [${index}]`);
-
-    parts.forEach(part => {
-        logger.debug(`part: [${part}]`);
-        if (_baseIndices[part]) {                    
-            batch.forEach(item => {
-                item.key_value += request[part];
-                item.key_value += '\u0000';    
-                logger.debug(`item: [${util.inspect(item)}]`);
-            });
-        } else {
-            ///
-            /// This is how to access a data key that has the same name as a field
-            /// in the normal schema
-            ///
-            if (part.startsWith("data.")) {
-                const subpart = part.substring(5);
-                errors = errors || buildValue(properties, subpart, batch);
-            } else if (properties[part]) {
-                errors = errors || buildValue(properties, part, batch);
-            } else {
-                logger.warn(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
-                errors = true;
-            }                  
-        }            
-    });
-
-    return errors ? null : batch;
-}
-
-function buildValue(properties, part, batch) {
-    logger.debug(`batch: [${util.inspect(batch)}]`);
-    const value = properties[part];
-    if (value) {
-        if (!Array.isArray(value)) {
-            if (part !== "current") {
-                batch.forEach(item => {
-                    item.key_value += value;
-                    item.key_value += '\u0000';    
-                });    
-            }
-            return false;
-        }
-        if (value.length > 0) {            
-            const new_batch = [];
-            batch.forEach(item => {
-                logger.debug(`item: [${util.inspect(item)}]`);
-                value.forEach(array_value => {
-                    const new_key = { key_name: item.key_name, key_value: item.key_value };                    
-                    new_key.key_value += array_value;
-                    new_key.key_value += '\u0000';    
-                    new_batch.push(new_key);
-                });
-            });
-            logger.debug(`new_batch: [${util.inspect(new_batch)}]`);
-            batch.length = 0;
-            new_batch.forEach(item => batch.push(item));
-            logger.debug(`batch: [${util.inspect(batch)}]`);
-            return false;   
-        }
-    } 
-    const key_name = batch[0].key_name;
-    logger.warn(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
-    return true;
-}
 
 Store.prototype.new = async function (request) {
     logger.info("Store new called");
@@ -401,63 +187,6 @@ Store.prototype.new = async function (request) {
     return response;
 };
 
-async function handleCurrentIndex(properties, parts, queries) {
-    let key_name = "";
-    let key_value = "";
-
-    parts.forEach(key => {
-        key_name += (key_name === "") ? key : "," + key;
-        if (key !== "current") {
-            const value = properties[key];
-            key_value += value;
-            key_value += "\u0000";
-            logger.debug(`handleCurrentIndex key_value: ${key_value}`);
-        }
-    });
-
-    logger.debug(`handleCurrentIndex request_index key_name: [${key_name}], key_value: [${key_value}]`);
-    const request_index = await Request_Index.findOneAsync({ key_name, key_value: { '$eq': key_value }}, { consistency: models.consistencies.local_quorum });
-    
-    if (request_index) {
-        const before = await Request.findOneAsync({ uuid: request_index.uuid}, { consistency: models.consistencies.local_quorum });
-        
-        if (before) {
-            const uuid = request_index.uuid;
-            logger.debug(`handleCurrentIndex uuid: ${uuid}`);                            
-            const before_data = JSON.parse(before.data || "{}");
-            
-            if (before_data.current) {
-                before_data.current = false;
-                before.data = JSON.stringify(before_data);
-            }
-            ///
-            /// Delete the index for what was the current record
-            ///
-            queries.push(new Request_Index({
-                key_name: request_index.key_name,
-                key_value: request_index.key_value,
-                created: request_index.created,
-                uuid: request_index.uuid
-            }).delete({ return_query: true }));
-            ///
-            /// Update the former request to no longer show as current
-            ///
-            queries.push(new Request({
-                uuid: before.uuid,
-                method: before.method,
-                url: before.url,
-                headers: before.headers,
-                body: before.body,
-                data: before.data,
-                display_message: before.display_message,
-                state: before.state,
-                task_id: before.task_id,
-                created: before.created                                
-            }).save({ return_query: true }));       
-        }
-    }
-};
-
 Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
     logger.info("Store update called");
     response = JSON.parse("{}");
@@ -489,9 +218,10 @@ Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
     logger.debug(`Store update after: ${util.inspect(after)}`)
 
     const after_data = JSON.parse(after.data);
-    after_data.lastUpdated = new Date().toISOString();
     const before_data = JSON.parse(before.data);    
+    logger.debug(`Store update after properties`);
     const after_properties = getProperties(after_data, false);
+    logger.debug(`Store update before properties`);
     const before_properties = getProperties(before_data, false);
     const queries = [];
 
@@ -537,8 +267,15 @@ Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
             let data_cursor = data;
             let after_cursor = after_data;
             parts.forEach(part => {
+                logger.debug(`part: [${part}]`);
                 if (!data_cursor[part])  {
                     data_cursor[part] = after_cursor[part];
+                    logger.debug(`break on part: [${part}]`);
+                    throw new _ex.BreakException();
+                }      
+                else if (typeof data_cursor[part] !== "object")  {
+                    data_cursor[part] = after_cursor[part];
+                    logger.debug(`break on part: [${part}]`);
                     throw new _ex.BreakException();
                 }      
 
@@ -559,11 +296,13 @@ Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
                             data_cursor.push(item);
                         }
                     });
+                    logger.debug(`break on array done`);
                     throw new _ex.BreakException();
                 }
 
-                if (typeof Array.data_cursor !== "object" ) {
+                if (typeof data_cursor !== "object" ) {
                     data_cursor = after_cursor;
+                    logger.debug(`break on data cursor not equal to object: [${data_cursor}]`);
                     throw new _ex.BreakException();
                 }
             });
@@ -575,6 +314,7 @@ Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
         }
     }
 
+    data.lastUpdated = new Date().toISOString();
     after.data = JSON.stringify(data);
     queries.push(new Request({
         uuid: Uuid.fromString(after.uuid),
@@ -796,7 +536,7 @@ Store.prototype.dropProperties = async function (body, query) {
             queries.push(...await this.update(after, after.uuid, before));        
         } catch(e) {
             pendingUpdates.forEach(uuid => cache.del(uuid));
-            return { "status": getStatus(e), "message": e.message };
+            return { "status": e.status, "message": e.message };
         }
     }
 
@@ -820,7 +560,7 @@ async function lockForUpdate(uuid) {
     }
 
     if (cache.get(uuid)) {
-        throw new TimeoutException(uuid);
+        throw new _ex.TimeoutException(uuid);
     }
 
     cache.set(uuid);
@@ -828,6 +568,277 @@ async function lockForUpdate(uuid) {
 
 function has_indices(indices) {
     return indices && Array.isArray(indices) && indices.length > 0;
+};
+
+///
+/// This gets the operator value and level for a index query
+/// Operator values are limited to GE for greater than or equal to and GT for greater than
+/// Operator level is any integer 0 through 999. This parameter is meant to limit results on 
+/// a key part to its key value based on its index + 1 into the composite index. For example, 
+/// if the composite key is entity.application,entity.type,entity.name and the operation level 
+/// is set to 2, then if we are querying for 'Demo\u0000\Oracle\u0000\dfw01ora001\u0000', we can
+/// expect to get results limited to entity.type="Oracle" even though "SQLServer" might be the 
+/// next key value ahead of "Oracle".
+///
+function getOperatorValue(query) {
+    const operator = query["operator"] || _reservedQueryStrings["operator"];
+    let opLevel = 999;
+    
+    if (operator.startsWith("GE") || operator.startsWith("GT")) {
+        if (operator.length > 2) {
+            const level = operator.substring(2);
+            if (!isNaN(level)) {
+                opLevel = parseInt(level, 10);
+            }
+        }  
+        return { operator: operator, opLevel: opLevel}      
+    } 
+        
+    return { status: 400, message: "Invalid operator. Operator can be of format GE[0-9]+ or GT[0-9]+" };
+};
+
+/// The properties collection accounts for each value level property in the data JSON payload.
+/// A value level property is one whose value is a primative type or Array List. The access to 
+/// a property uses a DOT notation to account for each level of hierarchy seen in the JSON payload. 
+/// For example given the application key below, the property would be "entity.application":
+///
+///     {
+///         "entity": {
+///             "application": "demo"
+///         }
+///     }
+///
+/// This properties list is meant to facilitate various operations needed to validate index parts
+/// and supply values where needed.
+///
+function getProperties(data, checkRequired) {
+    const properties = {}; 
+    for (let key in data) {
+        getChildren(properties, null, data[key], key);
+    }
+
+    if (checkRequired) {
+        for (let key in _requiredProperties) {
+            logger.debug(`getProperties required key: [${key}]`);
+            if (!properties[key]) {
+                throw new _ex.MissingRequiredPropertyException(key);
+            }
+        }
+    }
+    
+    for (let key in properties) {        
+        logger.debug(`property key: [${key}], value: [${properties[key]}]`);
+    }
+
+    return properties;
+    
+    ///
+    /// properties is our hash set of property names with corresponding values
+    ///
+    /// partial represents the descendant path of a partially qualified property name 
+    /// as we descend into its parts, or it may in fact be the fully qualified property.
+    ///
+    /// cursor for lack of a better term is the object reference holding the descendent 
+    /// properties that are at the same partial property name level as we recurse.
+    ///
+    /// key is the current key sampled to see what sort of object type it is
+    ///
+    function getChildren(properties, partial, cursor, key) {;
+        ///
+        /// A key will be a number when it is an index into an array
+        ///
+        if (isNaN(key)) {
+            partial = (partial === null) ? key : partial + "." + key;
+        } 
+        if (typeof cursor === "object") {
+            ///
+            /// If the current cursor is an object it has descendent parts
+            /// BTW, an array is also considered an Object, this is why we
+            /// check keys to see if they are not a number as we recurse.
+            ///
+            for (let child in cursor) {
+                getChildren(properties, partial, cursor[child], child);
+            }
+        } else if (isNaN(key)) {
+            properties[partial] = cursor;
+        } else {
+            ///
+            /// This is that special case where the key is actually just an index 
+            /// in an array
+            ///
+            if (key == 0) {
+                properties[partial] = [];    
+            }
+            properties[partial][key] = cursor;
+        }
+    }    
+}
+
+function buildKeys(request, indices, properties) {
+    const keys = [];
+    let errors = false;
+
+    if (has_indices(indices)) { 
+        indices.forEach(index => {
+            const batch = buildKey(request, index, properties);
+            const interimError = buildKeyObject(request, batch, keys);
+            errors = errors || interimError;
+        });
+    }
+
+    if (errors) {
+        throw {message: `Errors building indices for request with uuid: [${request.uuid}]`};
+    }
+
+    return keys;
+}
+
+///
+/// This completes the key values and pushes them into an array of keys for batch proccessing
+///
+function buildKeyObject(request, batch, keys) {
+    if (batch) {
+        batch.forEach(item => {
+            logger.debug(`item: [${util.inspect(item)}]`);
+            keys.push({ key_name: item.key_name, key_value: item.key_value, created: request.created, uuid: Uuid.fromString(request.uuid) });            
+        });   
+        return false 
+    } 
+
+    return true;    
+}
+
+///
+/// This creates the composite key values separating parts with a zero character code
+///
+function buildKey(request, index, properties) {
+    const key_name = index;
+    let errors = false;
+    let key_value = "";
+    const key = { key_name: key_name, key_value: key_value };
+    const batch = [ key ];
+    const parts = index.split(',');
+    logger.debug(`index: [${index}]`);
+
+    parts.forEach(part => {
+        logger.debug(`part: [${part}]`);
+        if (_baseIndices[part]) {                    
+            batch.forEach(item => {
+                item.key_value += request[part];
+                item.key_value += '\u0000';    
+                logger.debug(`item: [${util.inspect(item)}]`);
+            });
+        } else {
+            ///
+            /// This is how to access a data key that has the same name as a field
+            /// in the normal schema
+            ///
+            if (part.startsWith("data.")) {
+                const subpart = part.substring(5);
+                errors = errors || buildValue(properties, subpart, batch);
+            } else if (properties[part]) {
+                errors = errors || buildValue(properties, part, batch);
+            } else {
+                logger.warn(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
+                errors = true;
+            }                  
+        }            
+    });
+
+    return errors ? null : batch;
+}
+
+function buildValue(properties, part, batch) {
+    logger.debug(`batch: [${util.inspect(batch)}]`);
+    const value = properties[part];
+    if (value) {
+        if (!Array.isArray(value)) {
+            if (part !== "current") {
+                batch.forEach(item => {
+                    item.key_value += value;
+                    item.key_value += '\u0000';    
+                });    
+            }
+            return false;
+        }
+        if (value.length > 0) {            
+            const new_batch = [];
+            batch.forEach(item => {
+                logger.debug(`item: [${util.inspect(item)}]`);
+                value.forEach(array_value => {
+                    const new_key = { key_name: item.key_name, key_value: item.key_value };                    
+                    new_key.key_value += array_value;
+                    new_key.key_value += '\u0000';    
+                    new_batch.push(new_key);
+                });
+            });
+            logger.debug(`new_batch: [${util.inspect(new_batch)}]`);
+            batch.length = 0;
+            new_batch.forEach(item => batch.push(item));
+            logger.debug(`batch: [${util.inspect(batch)}]`);
+            return false;   
+        }
+    } 
+    const key_name = batch[0].key_name;
+    logger.warn(`new request index build failure: key_value part could not be assigned for '${part}' for key_name: ${key_name}`);
+    return true;
+}
+
+async function handleCurrentIndex(properties, parts, queries) {
+    let key_name = "";
+    let key_value = "";
+
+    parts.forEach(key => {
+        key_name += (key_name === "") ? key : "," + key;
+        if (key !== "current") {
+            const value = properties[key];
+            key_value += value;
+            key_value += "\u0000";
+            logger.debug(`handleCurrentIndex key_value: ${key_value}`);
+        }
+    });
+
+    logger.debug(`handleCurrentIndex request_index key_name: [${key_name}], key_value: [${key_value}]`);
+    const request_index = await Request_Index.findOneAsync({ key_name, key_value: { '$eq': key_value }}, { consistency: models.consistencies.local_quorum });
+    
+    if (request_index) {
+        const before = await Request.findOneAsync({ uuid: request_index.uuid}, { consistency: models.consistencies.local_quorum });
+        
+        if (before) {
+            const uuid = request_index.uuid;
+            logger.debug(`handleCurrentIndex uuid: ${uuid}`);                            
+            const before_data = JSON.parse(before.data || "{}");
+            
+            if (before_data.current) {
+                before_data.current = false;
+                before.data = JSON.stringify(before_data);
+            }
+            ///
+            /// Delete the index for what was the current record
+            ///
+            queries.push(new Request_Index({
+                key_name: request_index.key_name,
+                key_value: request_index.key_value,
+                created: request_index.created,
+                uuid: request_index.uuid
+            }).delete({ return_query: true }));
+            ///
+            /// Update the former request to no longer show as current
+            ///
+            queries.push(new Request({
+                uuid: before.uuid,
+                method: before.method,
+                url: before.url,
+                headers: before.headers,
+                body: before.body,
+                data: before.data,
+                display_message: before.display_message,
+                state: before.state,
+                task_id: before.task_id,
+                created: before.created                                
+            }).save({ return_query: true }));       
+        }
+    }
 };
 
 module.exports = {
