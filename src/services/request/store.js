@@ -1,6 +1,6 @@
-const { request } = require('http');
-
-const
+const { request } = require('http'),
+    NodeCache = require( "node-cache" ),
+    cache = new NodeCache(),
     models = require('express-cassandra'),
     util = require('util'),
     log4js = require('log4js'),
@@ -13,10 +13,7 @@ const
     _baseIndices = {state: true, task_id: true},
     _reservedProperties = { indices: true, foreignKeys: true, lastUpdated: true , current: true},
     _requiredProperties = {},
-    BreakException = function() { return new Error("break")},
-    IncompatibleTypesException = function() { return new Error("Incompatible type merging data JSON")},
-    ReserverdPropertyException = function(key) { return new Error(`Reserved property: [${key}] is not allowed`) },                              
-    MissingRequiredPropertyException = function(key) { return new Error(`Required property: [${key}] is missing`) };                                 
+    _ex = require('./exceptions');
 
 const logger = log4js.getLogger('activity-service-store');
 
@@ -138,6 +135,7 @@ Store.prototype.getByuuid = async function (uuid) {
     result.state = request.state;
     result.task_id = request.task_id;
     result.created = request.created;
+    result.last_write_on_display_message = request.last_write_on_display_message;
     return result;
 };
 
@@ -165,7 +163,7 @@ function getProperties(data, checkRequired) {
         for (let key in _requiredProperties) {
             logger.debug(`getProperties required key: [${key}]`);
             if (!properties[key]) {
-                throw new MissingRequiredPropertyException(key);
+                throw new _ex.MissingRequiredPropertyException(key);
             }
         }
     }
@@ -460,7 +458,7 @@ async function handleCurrentIndex(properties, parts, queries) {
     }
 };
 
-Store.prototype.update = async function (after, uuid, before) {
+Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
     logger.info("Store update called");
     response = JSON.parse("{}");
     const return_queries = before ? true : false;
@@ -470,6 +468,12 @@ Store.prototype.update = async function (after, uuid, before) {
         response.status = 409;
         response.message = "Update existing request failed: does not exist";
         return response;    
+    }
+
+    try {
+        await lockForUpdate(uuid);
+    } catch(e) {
+        return { "status": e.status, "message": e.message };
     }
 
     after.uuid = uuid;
@@ -485,10 +489,8 @@ Store.prototype.update = async function (after, uuid, before) {
     logger.debug(`Store update after: ${util.inspect(after)}`)
 
     const after_data = JSON.parse(after.data);
-    after_data.lastUpdated = after_data.lastUpdated || new Date().toISOString();
-
-    const before_data = JSON.parse(before.data);
-    
+    after_data.lastUpdated = new Date().toISOString();
+    const before_data = JSON.parse(before.data);    
     const after_properties = getProperties(after_data, false);
     const before_properties = getProperties(before_data, false);
     const queries = [];
@@ -537,18 +539,18 @@ Store.prototype.update = async function (after, uuid, before) {
             parts.forEach(part => {
                 if (!data_cursor[part])  {
                     data_cursor[part] = after_cursor[part];
-                    throw new BreakException();
+                    throw new _ex.BreakException();
                 }      
 
                 data_cursor = data_cursor[part];
                 after_cursor = after_cursor[part];
 
                 if (typeof data_cursor !== typeof after_cursor) {
-                    throw new IncompatibleTypesException();
+                    throw new _ex.IncompatibleTypesException();
                 }
 
                 if (Array.isArray(data_cursor) !== Array.isArray(after_cursor)) {
-                    throw new IncompatibleTypesException();
+                    throw new _ex.IncompatibleTypesException();
                 }
 
                 if (Array.isArray(data_cursor)) {
@@ -557,16 +559,19 @@ Store.prototype.update = async function (after, uuid, before) {
                             data_cursor.push(item);
                         }
                     });
-                    throw new BreakException();
+                    throw new _ex.BreakException();
                 }
 
                 if (typeof Array.data_cursor !== "object" ) {
                     data_cursor = after_cursor;
-                    throw new BreakException();
+                    throw new _ex.BreakException();
                 }
             });
         } catch(e) {
-            if (e !== BreakException) throw e;
+            if (e.status) {
+                if (pendingUpdates) pendingUpdates.forEach(uuid => cache.del(uuid));
+                return { "status": e.status, "message": e.message };
+            }
         }
     }
 
@@ -587,7 +592,9 @@ Store.prototype.update = async function (after, uuid, before) {
     if (return_queries) {
         return queries;
     }
+
     await models.doBatchAsync(queries);
+    cache.del(after.uuid);
     response.status = 200;
     response.message = "Updated request";
     return response;
@@ -629,130 +636,142 @@ Store.prototype.dropProperties = async function (body, query) {
         return requests;
     }
 
-    requests.forEach(request => {
+    const pendingUpdates = [];
+
+    for (let request in requests) {
         request.before = request.data;
-        const request_data = JSON.parse(request.data);        
-        const request_properties = getProperties(request_data, false);        
-        const dropped_properties = {};
-
-        for (let property in request_properties) {
-            const parts = property.split('.');
-            let request_cursor = request_data;
-            let drop_cursor = drop_data;
-            let partial = "";
-
-            try {
-                parts.forEach(part => {
-                    partial += (partial === "") ? part : "." + part;
-                    const request_value = request_cursor[part];
-                    const drop_value = drop_cursor[part];
-
-                    logger.debug(`partial: [${partial}], request_value: [${util.inspect(request_value)}], drop_value: [${util.inspect(drop_value)}]`);
-
-                    if (drop_value) {
-                        if (typeof drop_value !== "object" && typeof request_value === "object" && !Array.isArray(request_value)) {
-                            if (_reservedProperties[partial]) {
-                                throw new ReserverdPropertyException(partial);                                
-                            }   
-
-                            delete request_value[drop_value]; 
-                            dropped_properties[partial + "." + drop_value] = true;
-                            throw new BreakException();
-                        }
-
-                        if (Array.isArray(drop_value) && Array.isArray(request_value)) {
-                            drop_value.forEach(drop_item => {
-                                const index = request_value.indexOf(drop_item);
-                                
-                                if (index > -1) {
-                                    request_value.splice(index, 1);
-                                }    
-                            });
-
-                            throw new BreakException();
-                        } 
-
-                        if (_reservedProperties[partial]) {
-                            throw new ReserverdPropertyException(partial);
-                        }
-
-                        if (typeof drop_value !== "object" ) {
-                            delete request_cursor[part];
-                            dropped_properties[partial] = true;
-                            throw new BreakException();
-                        }
-
-                        request_cursor = request_value;
-                        drop_cursor = drop_value;
-                    }
-                });    
-            } catch (e) {
-                if (e !== BreakException) {
-                    return { "status": 400, "message": e.message };
-                }                
-            }
-        }
-
-        ///
-        /// Remove parts of any composite indexes where a property or its descendents are being dropped
-        /// For example, consider this the before composite index: 
-        ///     entity.type,entity.name,entity.options
-        /// 
-        /// if we are dropping the entity.options property then the above index is adjusted as follows:
-        ///     entity.type,entity.name
-        ///
-        const indices = request_data["indices"];    
-        if (has_indices(indices)) {
-            ///
-            /// we canot use a forEach lambda here because we may have to rebuild the index content
-            ///
-            for (let i = 0; i < indices.length; i++) {
-                const index = indices[i];
-                const parts = index.split(',');
-                let alteredParts = false;
-
-                for (let dropped_property in dropped_properties) {  
-                    let splicing = true;
-
-                    while (splicing) {
-                        splicing = false;
-
-                        for (let p = 0; p < parts.length; p++) {
-                            const part = parts[p];
-                            ///
-                            /// Remove the dropped property and any of its descendents.
-                            /// Short circuit the "while" loop if there are no more properties 
-                            /// to drop. Let's not try to be tricky here. If we splice at least 
-                            /// once then let's break and just go through the remaining parts 
-                            /// all over again to keep the splicing logic simple.
-                            ///
-                            if (part === dropped_property || part.startsWith(dropped_property + ".")) {
-                                parts.splice(p, 1);
-                                alteredParts = true;
-                                splicing = true;
-                                break;
-                            }
-                        }
-                    }                  
-                }
-
-                if (alteredParts) {
-                    indices[i] = parts.join(',');   
-                }
-            }           
-        }
-
-        ///
-        /// Do a final check to see if we have retained all our required prorperties
-        ///
         try {
-            getProperties(request_data, true);        
+            let uuid = request.uuid.toString();
+            await lockForUpdate(uuid);
+            pendingUpdates.push(uuid);
+            const request_data = JSON.parse(request.data);        
+            const request_properties = getProperties(request_data, false);        
+            const dropped_properties = {};
+    
+            for (let property in request_properties) {
+                const parts = property.split('.');
+                let request_cursor = request_data;
+                let drop_cursor = drop_data;
+                let partial = "";
+    
+                try {
+                    parts.forEach(part => {
+                        partial += (partial === "") ? part : "." + part;
+                        const request_value = request_cursor[part];
+                        const drop_value = drop_cursor[part];
+    
+                        logger.debug(`partial: [${partial}], request_value: [${util.inspect(request_value)}], drop_value: [${util.inspect(drop_value)}]`);
+    
+                        if (drop_value) {
+                            if (typeof drop_value !== "object" && typeof request_value === "object" && !Array.isArray(request_value)) {
+                                if (_reservedProperties[partial]) {
+                                    throw new _ex.ReserverdPropertyException(partial);                                
+                                }   
+    
+                                delete request_value[drop_value]; 
+                                dropped_properties[partial + "." + drop_value] = true;
+                                throw new _ex.BreakException();
+                            }
+    
+                            if (Array.isArray(drop_value) && Array.isArray(request_value)) {
+                                drop_value.forEach(drop_item => {
+                                    const index = request_value.indexOf(drop_item);
+                                    
+                                    if (index > -1) {
+                                        request_value.splice(index, 1);
+                                    }    
+                                });
+    
+                                throw new _ex.BreakException();
+                            } 
+    
+                            if (_reservedProperties[partial]) {
+                                throw new _ex.ReserverdPropertyException(partial);
+                            }
+    
+                            if (typeof drop_value !== "object" ) {
+                                delete request_cursor[part];
+                                dropped_properties[partial] = true;
+                                throw new _ex.BreakException();
+                            }
+    
+                            request_cursor = request_value;
+                            drop_cursor = drop_value;
+                        }
+                    });    
+                } catch (e) {
+                    if (e.status) {
+                        pendingUpdates.forEach(uuid => cache.del(uuid));
+                        return { "status": e.status, "message": e.message };
+                    }                
+                }
+            }
+    
+            ///
+            /// Remove parts of any composite indexes where a property or its descendents are being dropped
+            /// For example, consider this the before composite index: 
+            ///     entity.type,entity.name,entity.options
+            /// 
+            /// if we are dropping the entity.options property then the above index is adjusted as follows:
+            ///     entity.type,entity.name
+            ///
+            const indices = request_data["indices"];    
+            if (has_indices(indices)) {
+                ///
+                /// we canot use a forEach lambda here because we may have to rebuild the index content
+                ///
+                for (let i = 0; i < indices.length; i++) {
+                    const index = indices[i];
+                    const parts = index.split(',');
+                    let alteredParts = false;
+    
+                    for (let dropped_property in dropped_properties) {  
+                        let splicing = true;
+    
+                        while (splicing) {
+                            splicing = false;
+    
+                            for (let p = 0; p < parts.length; p++) {
+                                const part = parts[p];
+                                ///
+                                /// Remove the dropped property and any of its descendents.
+                                /// Short circuit the "while" loop if there are no more properties 
+                                /// to drop. Let's not try to be tricky here. If we splice at least 
+                                /// once then let's break and just go through the remaining parts 
+                                /// all over again to keep the splicing logic simple.
+                                ///
+                                if (part === dropped_property || part.startsWith(dropped_property + ".")) {
+                                    parts.splice(p, 1);
+                                    alteredParts = true;
+                                    splicing = true;
+                                    break;
+                                }
+                            }
+                        }                  
+                    }
+    
+                    if (alteredParts) {
+                        indices[i] = parts.join(',');   
+                    }
+                }           
+            }
+    
+            ///
+            /// Do a final check to see if we have retained all our required prorperties
+            ///
+            try {
+                getProperties(request_data, true);        
+            } catch (e) {
+                pendingUpdates.forEach(uuid => cache.del(uuid));
+                return { "status": e.status, "message": e.message };
+            }
         } catch (e) {
-            return { "status": 400, "message": e.message };
+            pendingUpdates.forEach(uuid => cache.del(uuid));
+            return { "status": e.status, "message": e.message };
         }
 
         logger.debug(`request_data: [${util.inspect(request_data)}]`);
-    });
+    }
 
     const queries = [];
     for (let after in requests) {
@@ -773,12 +792,39 @@ Store.prototype.dropProperties = async function (body, query) {
   
         /// append all the update queries and indexes
         ///
-        queries.push(...await this.update(after, after.uuid, before));        
+        try {
+            queries.push(...await this.update(after, after.uuid, before));        
+        } catch(e) {
+            pendingUpdates.forEach(uuid => cache.del(uuid));
+            return { "status": getStatus(e), "message": e.message };
+        }
     }
 
     await models.doBatchAsync(queries);
+    pendingUpdates.forEach(uuid => cache.del(uuid));
     return { status: 200, message: "Properties have been dropped, and any indexes have been rebuilt" };
 };
+
+async function lockForUpdate(uuid) {
+    const min_interval = 1;
+    const max_interval = 1500;
+    let previous_interval = min_interval;
+    let current_interval = min_interval;
+    let next_interval = min_interval;
+
+    while (cache.get(uuid) && current_interval < max_interval) {
+       await sleep(current_interval);
+       next_interval = previous_interval + current_interval;
+       previous_interval = current_interval;
+       current_interval = next_interval;
+    }
+
+    if (cache.get(uuid)) {
+        throw new TimeoutException(uuid);
+    }
+
+    cache.set(uuid);
+}
 
 function has_indices(indices) {
     return indices && Array.isArray(indices) && indices.length > 0;
