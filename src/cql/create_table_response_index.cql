@@ -5,7 +5,7 @@ CREATE TABLE response_index (
     "uuid" uuid,
     PRIMARY KEY (key_name, key_value, response_date, "uuid")
 ) WITH
-  CLUSTERING ORDER BY (metadata_value ASC,response_date DESC,"uuid" ASC)
+  CLUSTERING ORDER BY (key_value ASC,response_date DESC,"uuid" ASC)
   AND comment=''
   AND read_repair_chance=0
   AND dclocal_read_repair_chance=0.1
