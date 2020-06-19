@@ -267,15 +267,12 @@ Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
             let data_cursor = data;
             let after_cursor = after_data;
             parts.forEach(part => {
-                logger.debug(`part: [${part}]`);
                 if (!data_cursor[part])  {
                     data_cursor[part] = after_cursor[part];
-                    logger.debug(`break on part: [${part}]`);
                     throw new _ex.BreakException();
                 }      
                 else if (typeof data_cursor[part] !== "object")  {
                     data_cursor[part] = after_cursor[part];
-                    logger.debug(`break on part: [${part}]`);
                     throw new _ex.BreakException();
                 }      
 
@@ -296,13 +293,11 @@ Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
                             data_cursor.push(item);
                         }
                     });
-                    logger.debug(`break on array done`);
                     throw new _ex.BreakException();
                 }
 
                 if (typeof data_cursor !== "object" ) {
                     data_cursor = after_cursor;
-                    logger.debug(`break on data cursor not equal to object: [${data_cursor}]`);
                     throw new _ex.BreakException();
                 }
             });
