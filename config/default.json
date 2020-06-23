@@ -1,6 +1,6 @@
 {
   "server": {
-    "port": 8081,
+    "port": 8181,
     "prefix": "/activity-service"
   },
   "log4js": {
@@ -19,6 +19,5 @@
       }
     }
   },
-  "request_identity": { "entity": "application,type,name" },
-  "request_task": { "task": "type" }
+  "required_request_properties": ["entity.application", "entity.type", "entity.name", "task.type", "current"]
 }

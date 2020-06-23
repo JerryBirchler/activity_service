@@ -17,528 +17,534 @@ const { request } = require('http'),
 
 const logger = log4js.getLogger('activity-service-store');
 
-function Store() {
-}
-
-Store.prototype.init = async function (config) {
-    logger.info(`Store init`);
-    const required = config["required_request_properties"] || ["entity.application", "entity.type", "entity.name", "task.type", "current"];
-    required.forEach(property => {
-        _requiredProperties[property] = true;
-    });        
-};
-
-Store.prototype.get = async function (query) {
-    logger.info("Store get called");
-    let key_name = "";
-    let key_value = "";
-    let key_limit = "";
-    const opResult = getOperatorValue(query);
-
-    if (opResult.status) {
-        return opResult;
+class Store {
+    constructor() {
     }
+    async init(config) {
+        logger.info(`Store init`);
+        const required = config["required_request_properties"] || ["entity.application", "entity.type", "entity.name", "task.type", "current"];
+        required.forEach(property => {
+            _requiredProperties[property] = true;
+        });
+    }
+    async get(query) {
+        logger.info("Store get called");
+        let key_name = "";
+        let key_value = "";
+        let key_limit = "";
+        const opResult = getOperatorValue(query);
 
-    const operator = opResult.operator;
-    const opLevel = parseInt(opResult.opLevel, 10);
-
-    let level = 0;
-    _.keysIn(query).forEach(key => {
-        logger.debug(`Store get key: [${key}]`);
-        if (!_reservedQueryStrings[key]) {
-            key_name += (key_name == "") ? key : "," + key;
-            const value = query[key];
-            key_value += value;
-            key_value += "\u0000";
-            ///
-            /// This concept allows for queries to be limited to supplied key values so that 
-            /// I could for example get all entity.name(s) for entity.type="Oracle" without
-            /// worrying about spill over into the next type which may be "SQLServer". If the
-            /// operation level is set to zero, then none of the results are limited by the key 
-            /// values supplied. Whereas in the case presented above, if in that case the top level 
-            /// index part was entity.type, then an operation level of one would in fact limit 
-            /// the results to let's say "Oracle". This is intended to provide some flexibility
-            /// to filter queried results for perhaps a UI display of a list of entities based 
-            /// on some criteria. The default operation level is 999, which essentially means that
-            /// results are limited to matching all the key values supplied.
-            ///
-            key_limit += (opLevel > level) ? value : "\uFFFF";
-            key_limit += "\uFFFF";
-            level++;
+        if (opResult.status) {
+            return opResult;
         }
-    });
 
-    logger.debug(`Store get key_name: [${key_name}], key_value: [${key_value}], key_limit[${key_limit}], opLevel: [${opLevel}]`);
-    const uuids = {};
-    const indexes = operator.startsWith("GE") 
-        ? await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum })
-        : await Request_Index.findAsync({ key_name, key_value: { '$gt': key_value, '$lte': key_limit }}, { consistency: models.consistencies.local_quorum });
+        const operator = opResult.operator;
+        const opLevel = parseInt(opResult.opLevel, 10);
 
-    ///
-    /// Create a unique hash set of all the uuids returned to pair down request queries
-    ///        
-    indexes.forEach(request => { uuids[request.uuid] = true; });
-
-    ///
-    /// Let's batch up all the UUIDs from the index results so that we can get all the requests that 
-    /// match. We may need to throttle this if the request payload exceeds some threshold that breaks 
-    /// Cassandra Express calls or  because we might want to throttle the number of requests returned
-    ///
-    const inClause = [];        
-    for (let uuid in uuids) { inClause.push(Uuid.fromString(uuid)); }
-    return await Request.findAsync({uuid: { '$in': inClause }}, { consistency: models.consistencies.local_quorum });
-};
-
-Store.prototype.getByuuid = async function (uuid) {
-    logger.info("Store getByuuid called");
-    if (!uuid) return;
-
-    logger.debug(`uuid: [${util.inspect(uuid)}]`);
-
-    const request = await Request.findOneAsync({ uuid: Uuid.fromString(uuid) }, { consistency: models.consistencies.local_quorum });
-    if (!request) return;
-    const result = JSON.parse("{}");
-    result.uuid = request.uuid;
-    result.method = request.method;
-    result.url = request.url;
-    result.headers = request.headers;
-    result.body = request.body;
-    result.data = request.data || "{}";
-    result.display_message = request.display_message;
-    result.state = request.state;
-    result.task_id = request.task_id;
-    result.created = request.created;
-    result.last_write_on_display_message = request.last_write_on_display_message;
-    return result;
-};
-
-Store.prototype.new = async function (request) {
-    logger.info("Store new called");
-    response = JSON.parse("{}")
-    const before = await this.getByuuid(request.uuid);
-
-    if (before && before.uuid) {
-        response.status = 409;
-        response.message = "Add new request failed: already exists";
-        return response;
-    }
-
-    request.method = request.method || "POST";
-    request.url = request.url || "";
-    request.headers = request.headers || "{}";
-    request.body = request.body || "";
-    request.data = request.data || "{}";
-    request.display_message = request.display_message || "";
-    request.state = request.state || 0;
-    request.task_id = request.task_id || "";
-    request.created = request.created || new Date().toISOString();
-
-    const data = JSON.parse(request.data);
-    let properties;
-    try {
-        properties = getProperties(data, true);
-    } catch (e) {
-        response.status = 400;
-        response.message = e.message;
-        return response;
-    }
-    const indices = data.indices;
-    const keys = buildKeys(request, indices, properties);    
-    const queries = [];
-
-    ///
-    /// Loop through all of the composite indexes and batch up queries to insert them. 
-    /// When the composite index contains "current", make sure to chase down the former 
-    /// current index for this entity, remove it and update that request to show 
-    /// "current": false. This is done so that with a properly formatted query it should
-    /// be possible to get an inventory of all current requests by individual entities 
-    /// That should be sufficient to merge request status information into a grid control 
-    /// in any UI that displays entities.
-    ///
-    for (let i = 0; i < indices.length; i++) {
-        const index = indices[i];
-        const parts = index.split(',');
-
-        if (parts.includes("current")) {
-            await handleCurrentIndex(properties, parts, queries);
-        }
-    }
-    
-    logger.debug(`keys: [${util.inspect(keys)}]`);    
-
-    queries.push(new Request({
-        uuid: Uuid.fromString(request.uuid),
-        method: request.method,
-        url: request.url,
-        headers: request.headers,
-        body: request.body,
-        data: request.data,
-        display_message: request.display_message,
-        state: request.state,
-        task_id: request.task_id,
-        created: request.created
-    }).save({ return_query: true }));
-
-    keys.forEach(key => queries.push(new Request_Index(key).save({ return_query: true })));
-
-    await models.doBatchAsync(queries);
-    response.status = 201;
-    response.message = "Created new request";
-    return response;
-};
-
-Store.prototype.update = async function (after, uuid, before, pendingUpdates) {
-    logger.info("Store update called");
-    response = JSON.parse("{}");
-    const return_queries = before ? true : false;
-    before = before || await this.getByuuid(uuid);
-    
-    if (!before) {
-        response.status = 409;
-        response.message = "Update existing request failed: does not exist";
-        return response;    
-    }
-
-    try {
-        await lockForUpdate(uuid);
-    } catch(e) {
-        return { "status": e.status, "message": e.message };
-    }
-
-    after.uuid = uuid;
-    after.method = before.method;
-    after.url = before.url;
-    after.headers = before.headers;
-    after.display_message = after.display_message || before.display_message;
-    after.state = after.state || before.state;
-    after.task_id = before.task_id;
-    after.created = before.created;
-    before.uuid = before.uuid.toString();
-
-    logger.debug(`Store update after: ${util.inspect(after)}`)
-
-    const after_data = JSON.parse(after.data);
-    const before_data = JSON.parse(before.data);    
-    logger.debug(`Store update after properties`);
-    const after_properties = getProperties(after_data, false);
-    logger.debug(`Store update before properties`);
-    const before_properties = getProperties(before_data, false);
-    const queries = [];
-
-    //========================================
-    // update indices where state has changed
-    //========================================
-    if (has_indices(before_data.indices)) {
-        const keys = [];
-        let errors = false;
-        before_data.indices.forEach(index => {
-            logger.debug(`Store update index: [${util.inspect(index)}] `);
-            if (before.state !== after.state && index.split(',').includes("state")) {
-                const batch = buildKey(before, index, before_properties);
-                const interimError = buildKeyObject(before, batch, keys);
-                errors = errors || interimError;
+        let level = 0;
+        _.keysIn(query).forEach(key => {
+            logger.debug(`Store get key: [${key}]`);
+            if (!_reservedQueryStrings[key]) {
+                key_name += (key_name == "") ? key : "," + key;
+                const value = query[key];
+                key_value += value;
+                key_value += "\u0000";
+                ///
+                /// This concept allows for queries to be limited to supplied key values so that 
+                /// I could for example get all entity.name(s) for entity.type="Oracle" without
+                /// worrying about spill over into the next type which may be "SQLServer". If the
+                /// operation level is set to zero, then none of the results are limited by the key 
+                /// values supplied. Whereas in the case presented above, if in that case the top level 
+                /// index part was entity.type, then an operation level of one would in fact limit 
+                /// the results to let's say "Oracle". This is intended to provide some flexibility
+                /// to filter queried results for perhaps a UI display of a list of entities based 
+                /// on some criteria. The default operation level is 999, which essentially means that
+                /// results are limited to matching all the key values supplied.
+                ///
+                key_limit += (opLevel > level) ? value : "\uFFFF";
+                key_limit += "\uFFFF";
+                level++;
             }
         });
-        
-        keys.forEach(key => queries.push(new Request_Index(key).delete({ return_query: true })));
 
-        before_data.indices.forEach(index => {
-            logger.debug(`Store update index: [${util.inspect(index)}] `);
-            if (before.state !== after.state && index.split(',').includes("state")) {
-                const batch = buildKey(after, index, before_properties);
-                const interimError = buildKeyObject(after, batch, keys);
-                errors = errors || interimError;
+        logger.debug(`Store get key_name: [${key_name}], key_value: [${key_value}], key_limit[${key_limit}], opLevel: [${opLevel}]`);
+        const uuids = {};
+        const indexes = operator.startsWith("GE")
+            ? await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value, '$lte': key_limit } }, { consistency: models.consistencies.local_quorum })
+            : await Request_Index.findAsync({ key_name, key_value: { '$gt': key_value, '$lte': key_limit } }, { consistency: models.consistencies.local_quorum });
+
+        ///
+        /// Create a unique hash set of all the uuids returned to pair down request queries
+        ///        
+        indexes.forEach(request => { uuids[request.uuid] = true; });
+
+        ///
+        /// Let's batch up all the UUIDs from the index results so that we can get all the requests that 
+        /// match. We may need to throttle this if the request payload exceeds some threshold that breaks 
+        /// Cassandra Express calls or  because we might want to throttle the number of requests returned
+        ///
+        const inClause = [];
+        for (let uuid in uuids) { inClause.push(Uuid.fromString(uuid)); }
+        return await Request.findAsync({ uuid: { '$in': inClause } }, { consistency: models.consistencies.local_quorum });
+    }
+    async getByuuid(uuid) {
+        logger.info("Store getByuuid called");
+        if (!uuid)
+            return;
+
+        logger.debug(`uuid: [${util.inspect(uuid)}]`);
+
+        const request = await Request.findOneAsync({ uuid: Uuid.fromString(uuid) }, { consistency: models.consistencies.local_quorum });
+        if (!request)
+            return;
+        const result = JSON.parse("{}");
+        result.uuid = request.uuid;
+        result.method = request.method;
+        result.url = request.url;
+        result.headers = request.headers;
+        result.body = request.body;
+        result.data = request.data || "{}";
+        result.display_message = request.display_message;
+        result.state = request.state;
+        result.task_id = request.task_id;
+        result.created = request.created;
+        result.last_write_on_display_message = request.last_write_on_display_message;
+        return result;
+    }
+    async new(request) {
+        logger.info("Store new called");
+        response = JSON.parse("{}");
+        const before = await this.getByuuid(request.uuid);
+
+        if (before && before.uuid) {
+            response.status = 409;
+            response.message = "Add new request failed: already exists";
+            return response;
+        }
+
+        request.method = request.method || "POST";
+        request.url = request.url || "";
+        request.headers = request.headers || "{}";
+        request.body = request.body || "";
+        request.data = request.data || "{}";
+        request.display_message = request.display_message || "";
+        request.state = request.state || 0;
+        request.task_id = request.task_id || "";
+        request.created = request.created || new Date().toISOString();
+
+        const data = JSON.parse(request.data);
+        let properties;
+        try {
+            properties = getProperties(data, true);
+        }
+        catch (e) {
+            response.status = 400;
+            response.message = e.message;
+            return response;
+        }
+        const indices = data.indices;
+        const keys = buildKeys(request, indices, properties);
+        const queries = [];
+
+        ///
+        /// Loop through all of the composite indexes and batch up queries to insert them. 
+        /// When the composite index contains "current", make sure to chase down the former 
+        /// current index for this entity, remove it and update that request to show 
+        /// "current": false. This is done so that with a properly formatted query it should
+        /// be possible to get an inventory of all current requests by individual entities 
+        /// That should be sufficient to merge request status information into a grid control 
+        /// in any UI that displays entities.
+        ///
+        for (let i = 0; i < indices.length; i++) {
+            const index = indices[i];
+            const parts = index.split(',');
+
+            if (parts.includes("current")) {
+                await handleCurrentIndex(properties, parts, queries);
             }
-        });
+        }
+
+        logger.debug(`keys: [${util.inspect(keys)}]`);
+
+        queries.push(new Request({
+            uuid: Uuid.fromString(request.uuid),
+            method: request.method,
+            url: request.url,
+            headers: request.headers,
+            body: request.body,
+            data: request.data,
+            display_message: request.display_message,
+            state: request.state,
+            task_id: request.task_id,
+            created: request.created
+        }).save({ return_query: true }));
 
         keys.forEach(key => queries.push(new Request_Index(key).save({ return_query: true })));
-        queries.forEach(query => logger.debug(`Store update query: [${util.inspect(query)}]`));
+
+        await models.doBatchAsync(queries);
+        response.status = 201;
+        response.message = "Created new request";
+        return response;
     }
+    async update(after, uuid, before, pendingUpdates) {
+        logger.info("Store update called");
+        response = JSON.parse("{}");
+        const return_queries = before ? true : false;
+        before = before || await this.getByuuid(uuid);
 
-    //======================================================
-    // merge data from before and after and add lastUpdated
-    //======================================================
-    const data = before_data;
-    
-    for (let property in after_properties) {
-        logger.debug(`Store update property: [${property}]`);
-        const parts = property.split('.');
-        try {
-            let data_cursor = data;
-            let after_cursor = after_data;
-            parts.forEach(part => {
-                if (!data_cursor[part])  {
-                    data_cursor[part] = after_cursor[part];
-                    throw new _ex.BreakException();
-                }      
-                else if (typeof data_cursor[part] !== "object")  {
-                    data_cursor[part] = after_cursor[part];
-                    throw new _ex.BreakException();
-                }      
-
-                data_cursor = data_cursor[part];
-                after_cursor = after_cursor[part];
-
-                if (typeof data_cursor !== typeof after_cursor) {
-                    throw new _ex.IncompatibleTypesException();
-                }
-
-                if (Array.isArray(data_cursor) !== Array.isArray(after_cursor)) {
-                    throw new _ex.IncompatibleTypesException();
-                }
-
-                if (Array.isArray(data_cursor)) {
-                    after_cursor.forEach(item => {
-                        if (!data_cursor.includes(item)) {
-                            data_cursor.push(item);
-                        }
-                    });
-                    throw new _ex.BreakException();
-                }
-
-                if (typeof data_cursor !== "object" ) {
-                    data_cursor = after_cursor;
-                    throw new _ex.BreakException();
-                }
-            });
-        } catch(e) {
-            if (e.status) {
-                if (pendingUpdates) pendingUpdates.forEach(uuid => cache.del(uuid));
-                return { "status": e.status, "message": e.message };
-            }
+        if (!before) {
+            response.status = 409;
+            response.message = "Update existing request failed: does not exist";
+            return response;
         }
-    }
 
-    data.lastUpdated = new Date().toISOString();
-    after.data = JSON.stringify(data);
-    queries.push(new Request({
-        uuid: Uuid.fromString(after.uuid),
-        method: after.method,
-        url: after.url,
-        headers: after.headers,
-        body: after.body,
-        data: after.data,
-        display_message: after.display_message,
-        state: after.state,
-        task_id: after.task_id,
-        created: after.created
-    }).save({ return_query: true }));
-    
-    if (return_queries) {
-        return queries;
-    }
-
-    await models.doBatchAsync(queries);
-    cache.del(after.uuid);
-    response.status = 200;
-    response.message = "Updated request";
-    return response;
-};
-
-///
-/// Dropping properties literally translates into removal of those properties and their descendents
-/// from the JSON payload of the data field for every request returned by the query string provided.
-/// It also means that any index referencing a dropped property has to be adjusted to no longer use
-/// that property or its descendents. This also implies that the former index needs to be deleted 
-/// and that the adjusted index needs to be inserted.
-///
-Store.prototype.dropProperties = async function (body, query) {
-    logger.info("Store drop properties called");
-    const drop_data = JSON.parse(body.data || "{}");
-    const drop_properties = getProperties(drop_data, false);
-
-    logger.debug(`drop_properties: [${util.inspect(drop_properties)}]`);
-
-    if (Object.keys(drop_properties).length === 0) {
-        return { status: 400, message: "Data properties have to be set for droppping" };
-    }
-
-    for (let key in drop_properties) {
-        if (_requiredProperties[key]) {
-            return { status: 400, message: `Cannot drop required property: [${key}]` };
-        }
-    }
-
-    ///
-    /// This uses the query string approach to gathering all the requests we want to drop properties from
-    ///
-    const requests = await this.get(query);
-
-    ///
-    /// If the return value is not an array, it indicates some sort of failure
-    ///
-    if (!Array.isArray(requests)) {
-        return requests;
-    }
-
-    const pendingUpdates = [];
-
-    for (let request in requests) {
-        request.before = request.data;
         try {
-            let uuid = request.uuid.toString();
             await lockForUpdate(uuid);
-            pendingUpdates.push(uuid);
-            const request_data = JSON.parse(request.data);        
-            const request_properties = getProperties(request_data, false);        
-            const dropped_properties = {};
-    
-            for (let property in request_properties) {
-                const parts = property.split('.');
-                let request_cursor = request_data;
-                let drop_cursor = drop_data;
-                let partial = "";
-    
-                try {
-                    parts.forEach(part => {
-                        partial += (partial === "") ? part : "." + part;
-                        const request_value = request_cursor[part];
-                        const drop_value = drop_cursor[part];
-    
-                        logger.debug(`partial: [${partial}], request_value: [${util.inspect(request_value)}], drop_value: [${util.inspect(drop_value)}]`);
-    
-                        if (drop_value) {
-                            if (typeof drop_value !== "object" && typeof request_value === "object" && !Array.isArray(request_value)) {
-                                if (_reservedProperties[partial]) {
-                                    throw new _ex.ReserverdPropertyException(partial);                                
-                                }   
-    
-                                delete request_value[drop_value]; 
-                                dropped_properties[partial + "." + drop_value] = true;
-                                throw new _ex.BreakException();
-                            }
-    
-                            if (Array.isArray(drop_value) && Array.isArray(request_value)) {
-                                drop_value.forEach(drop_item => {
-                                    const index = request_value.indexOf(drop_item);
-                                    
-                                    if (index > -1) {
-                                        request_value.splice(index, 1);
-                                    }    
-                                });
-    
-                                throw new _ex.BreakException();
-                            } 
-    
-                            if (_reservedProperties[partial]) {
-                                throw new _ex.ReserverdPropertyException(partial);
-                            }
-    
-                            if (typeof drop_value !== "object" ) {
-                                delete request_cursor[part];
-                                dropped_properties[partial] = true;
-                                throw new _ex.BreakException();
-                            }
-    
-                            request_cursor = request_value;
-                            drop_cursor = drop_value;
-                        }
-                    });    
-                } catch (e) {
-                    if (e.status) {
-                        pendingUpdates.forEach(uuid => cache.del(uuid));
-                        return { "status": e.status, "message": e.message };
-                    }                
-                }
-            }
-    
-            ///
-            /// Remove parts of any composite indexes where a property or its descendents are being dropped
-            /// For example, consider this the before composite index: 
-            ///     entity.type,entity.name,entity.options
-            /// 
-            /// if we are dropping the entity.options property then the above index is adjusted as follows:
-            ///     entity.type,entity.name
-            ///
-            const indices = request_data["indices"];    
-            if (has_indices(indices)) {
-                ///
-                /// we canot use a forEach lambda here because we may have to rebuild the index content
-                ///
-                for (let i = 0; i < indices.length; i++) {
-                    const index = indices[i];
-                    const parts = index.split(',');
-                    let alteredParts = false;
-    
-                    for (let dropped_property in dropped_properties) {  
-                        let splicing = true;
-    
-                        while (splicing) {
-                            splicing = false;
-    
-                            for (let p = 0; p < parts.length; p++) {
-                                const part = parts[p];
-                                ///
-                                /// Remove the dropped property and any of its descendents.
-                                /// Short circuit the "while" loop if there are no more properties 
-                                /// to drop. Let's not try to be tricky here. If we splice at least 
-                                /// once then let's break and just go through the remaining parts 
-                                /// all over again to keep the splicing logic simple.
-                                ///
-                                if (part === dropped_property || part.startsWith(dropped_property + ".")) {
-                                    parts.splice(p, 1);
-                                    alteredParts = true;
-                                    splicing = true;
-                                    break;
-                                }
-                            }
-                        }                  
-                    }
-    
-                    if (alteredParts) {
-                        indices[i] = parts.join(',');   
-                    }
-                }           
-            }
-    
-            ///
-            /// Do a final check to see if we have retained all our required prorperties
-            ///
-            try {
-                getProperties(request_data, true);        
-            } catch (e) {
-                pendingUpdates.forEach(uuid => cache.del(uuid));
-                return { "status": e.status, "message": e.message };
-            }
-        } catch (e) {
-            pendingUpdates.forEach(uuid => cache.del(uuid));
+        }
+        catch (e) {
             return { "status": e.status, "message": e.message };
         }
 
-        logger.debug(`request_data: [${util.inspect(request_data)}]`);
-    }
+        after.uuid = uuid;
+        after.method = before.method;
+        after.url = before.url;
+        after.headers = before.headers;
+        after.display_message = after.display_message || before.display_message;
+        after.state = after.state || before.state;
+        after.task_id = before.task_id;
+        after.created = before.created;
+        before.uuid = before.uuid.toString();
 
-    const queries = [];
-    for (let after in requests) {
-        const before_data = after.before_data || "{}";
-        delete after.before_data;
-        const before = { 
-            uuid: after.uuid,
+        logger.debug(`Store update after: ${util.inspect(after)}`);
+
+        const after_data = JSON.parse(after.data);
+        const before_data = JSON.parse(before.data);
+        logger.debug(`Store update after properties`);
+        const after_properties = getProperties(after_data, false);
+        logger.debug(`Store update before properties`);
+        const before_properties = getProperties(before_data, false);
+        const queries = [];
+
+        //========================================
+        // update indices where state has changed
+        //========================================
+        if (has_indices(before_data.indices)) {
+            const keys = [];
+            let errors = false;
+            before_data.indices.forEach(index => {
+                logger.debug(`Store update index: [${util.inspect(index)}] `);
+                if (before.state !== after.state && index.split(',').includes("state")) {
+                    const batch = buildKey(before, index, before_properties);
+                    const interimError = buildKeyObject(before, batch, keys);
+                    errors = errors || interimError;
+                }
+            });
+
+            keys.forEach(key => queries.push(new Request_Index(key).delete({ return_query: true })));
+
+            before_data.indices.forEach(index => {
+                logger.debug(`Store update index: [${util.inspect(index)}] `);
+                if (before.state !== after.state && index.split(',').includes("state")) {
+                    const batch = buildKey(after, index, before_properties);
+                    const interimError = buildKeyObject(after, batch, keys);
+                    errors = errors || interimError;
+                }
+            });
+
+            keys.forEach(key => queries.push(new Request_Index(key).save({ return_query: true })));
+            queries.forEach(query => logger.debug(`Store update query: [${util.inspect(query)}]`));
+        }
+
+        //======================================================
+        // merge data from before and after and add lastUpdated
+        //======================================================
+        const data = before_data;
+
+        for (let property in after_properties) {
+            logger.debug(`Store update property: [${property}]`);
+            const parts = property.split('.');
+            try {
+                let data_cursor = data;
+                let after_cursor = after_data;
+                parts.forEach(part => {
+                    if (!data_cursor[part]) {
+                        data_cursor[part] = after_cursor[part];
+                        throw new _ex.BreakException();
+                    }
+                    else if (typeof data_cursor[part] !== "object") {
+                        data_cursor[part] = after_cursor[part];
+                        throw new _ex.BreakException();
+                    }
+
+                    data_cursor = data_cursor[part];
+                    after_cursor = after_cursor[part];
+
+                    if (typeof data_cursor !== typeof after_cursor) {
+                        throw new _ex.IncompatibleTypesException();
+                    }
+
+                    if (Array.isArray(data_cursor) !== Array.isArray(after_cursor)) {
+                        throw new _ex.IncompatibleTypesException();
+                    }
+
+                    if (Array.isArray(data_cursor)) {
+                        after_cursor.forEach(item => {
+                            if (!data_cursor.includes(item)) {
+                                data_cursor.push(item);
+                            }
+                        });
+                        throw new _ex.BreakException();
+                    }
+
+                    if (typeof data_cursor !== "object") {
+                        data_cursor = after_cursor;
+                        throw new _ex.BreakException();
+                    }
+                });
+            }
+            catch (e) {
+                if (e.status) {
+                    if (pendingUpdates)
+                        pendingUpdates.forEach(uuid => cache.del(uuid));
+                    return { "status": e.status, "message": e.message };
+                }
+            }
+        }
+
+        data.lastUpdated = new Date().toISOString();
+        after.data = JSON.stringify(data);
+        queries.push(new Request({
+            uuid: Uuid.fromString(after.uuid),
             method: after.method,
             url: after.url,
             headers: after.headers,
             body: after.body,
-            data: before_data,
+            data: after.data,
             display_message: after.display_message,
             state: after.state,
             task_id: after.task_id,
-            created: after.created                  
-        };
-  
-        /// append all the update queries and indexes
-        ///
-        try {
-            queries.push(...await this.update(after, after.uuid, before));        
-        } catch(e) {
-            pendingUpdates.forEach(uuid => cache.del(uuid));
-            return { "status": e.status, "message": e.message };
-        }
-    }
+            created: after.created
+        }).save({ return_query: true }));
 
-    await models.doBatchAsync(queries);
-    pendingUpdates.forEach(uuid => cache.del(uuid));
-    return { status: 200, message: "Properties have been dropped, and any indexes have been rebuilt" };
-};
+        if (return_queries) {
+            return queries;
+        }
+
+        await models.doBatchAsync(queries);
+        cache.del(after.uuid);
+        response.status = 200;
+        response.message = "Updated request";
+        return response;
+    }
+    ///
+    /// Dropping properties literally translates into removal of those properties and their descendents
+    /// from the JSON payload of the data field for every request returned by the query string provided.
+    /// It also means that any index referencing a dropped property has to be adjusted to no longer use
+    /// that property or its descendents. This also implies that the former index needs to be deleted 
+    /// and that the adjusted index needs to be inserted.
+    ///
+    async dropProperties(body, query) {
+        logger.info("Store drop properties called");
+        const drop_data = JSON.parse(body.data || "{}");
+        const drop_properties = getProperties(drop_data, false);
+
+        logger.debug(`drop_properties: [${util.inspect(drop_properties)}]`);
+
+        if (Object.keys(drop_properties).length === 0) {
+            return { status: 400, message: "Data properties have to be set for droppping" };
+        }
+
+        for (let key in drop_properties) {
+            if (_requiredProperties[key]) {
+                return { status: 400, message: `Cannot drop required property: [${key}]` };
+            }
+        }
+
+        ///
+        /// This uses the query string approach to gathering all the requests we want to drop properties from
+        ///
+        const requests = await this.get(query);
+
+        ///
+        /// If the return value is not an array, it indicates some sort of failure
+        ///
+        if (!Array.isArray(requests)) {
+            return requests;
+        }
+
+        const pendingUpdates = [];
+
+        for (let request in requests) {
+            request.before = request.data;
+            try {
+                let uuid = request.uuid.toString();
+                await lockForUpdate(uuid);
+                pendingUpdates.push(uuid);
+                const request_data = JSON.parse(request.data);
+                const request_properties = getProperties(request_data, false);
+                const dropped_properties = {};
+
+                for (let property in request_properties) {
+                    const parts = property.split('.');
+                    let request_cursor = request_data;
+                    let drop_cursor = drop_data;
+                    let partial = "";
+
+                    try {
+                        parts.forEach(part => {
+                            partial += (partial === "") ? part : "." + part;
+                            const request_value = request_cursor[part];
+                            const drop_value = drop_cursor[part];
+
+                            logger.debug(`partial: [${partial}], request_value: [${util.inspect(request_value)}], drop_value: [${util.inspect(drop_value)}]`);
+
+                            if (drop_value) {
+                                if (typeof drop_value !== "object" && typeof request_value === "object" && !Array.isArray(request_value)) {
+                                    if (_reservedProperties[partial]) {
+                                        throw new _ex.ReserverdPropertyException(partial);
+                                    }
+
+                                    delete request_value[drop_value];
+                                    dropped_properties[partial + "." + drop_value] = true;
+                                    throw new _ex.BreakException();
+                                }
+
+                                if (Array.isArray(drop_value) && Array.isArray(request_value)) {
+                                    drop_value.forEach(drop_item => {
+                                        const index = request_value.indexOf(drop_item);
+
+                                        if (index > -1) {
+                                            request_value.splice(index, 1);
+                                        }
+                                    });
+
+                                    throw new _ex.BreakException();
+                                }
+
+                                if (_reservedProperties[partial]) {
+                                    throw new _ex.ReserverdPropertyException(partial);
+                                }
+
+                                if (typeof drop_value !== "object") {
+                                    delete request_cursor[part];
+                                    dropped_properties[partial] = true;
+                                    throw new _ex.BreakException();
+                                }
+
+                                request_cursor = request_value;
+                                drop_cursor = drop_value;
+                            }
+                        });
+                    }
+                    catch (e) {
+                        if (e.status) {
+                            pendingUpdates.forEach(uuid => cache.del(uuid));
+                            return { "status": e.status, "message": e.message };
+                        }
+                    }
+                }
+
+                ///
+                /// Remove parts of any composite indexes where a property or its descendents are being dropped
+                /// For example, consider this the before composite index: 
+                ///     entity.type,entity.name,entity.options
+                /// 
+                /// if we are dropping the entity.options property then the above index is adjusted as follows:
+                ///     entity.type,entity.name
+                ///
+                const indices = request_data["indices"];
+                if (has_indices(indices)) {
+                    ///
+                    /// we canot use a forEach lambda here because we may have to rebuild the index content
+                    ///
+                    for (let i = 0; i < indices.length; i++) {
+                        const index = indices[i];
+                        const parts = index.split(',');
+                        let alteredParts = false;
+
+                        for (let dropped_property in dropped_properties) {
+                            let splicing = true;
+
+                            while (splicing) {
+                                splicing = false;
+
+                                for (let p = 0; p < parts.length; p++) {
+                                    const part = parts[p];
+                                    ///
+                                    /// Remove the dropped property and any of its descendents.
+                                    /// Short circuit the "while" loop if there are no more properties 
+                                    /// to drop. Let's not try to be tricky here. If we splice at least 
+                                    /// once then let's break and just go through the remaining parts 
+                                    /// all over again to keep the splicing logic simple.
+                                    ///
+                                    if (part === dropped_property || part.startsWith(dropped_property + ".")) {
+                                        parts.splice(p, 1);
+                                        alteredParts = true;
+                                        splicing = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (alteredParts) {
+                            indices[i] = parts.join(',');
+                        }
+                    }
+                }
+
+                ///
+                /// Do a final check to see if we have retained all our required prorperties
+                ///
+                try {
+                    getProperties(request_data, true);
+                }
+                catch (e) {
+                    pendingUpdates.forEach(uuid => cache.del(uuid));
+                    return { "status": e.status, "message": e.message };
+                }
+            }
+            catch (e) {
+                pendingUpdates.forEach(uuid => cache.del(uuid));
+                return { "status": e.status, "message": e.message };
+            }
+
+            logger.debug(`request_data: [${util.inspect(request_data)}]`);
+        }
+
+        const queries = [];
+        for (let after in requests) {
+            const before_data = after.before_data || "{}";
+            delete after.before_data;
+            const before = {
+                uuid: after.uuid,
+                method: after.method,
+                url: after.url,
+                headers: after.headers,
+                body: after.body,
+                data: before_data,
+                display_message: after.display_message,
+                state: after.state,
+                task_id: after.task_id,
+                created: after.created
+            };
+
+            /// append all the update queries and indexes
+            ///
+            try {
+                queries.push(...await this.update(after, after.uuid, before));
+            }
+            catch (e) {
+                pendingUpdates.forEach(uuid => cache.del(uuid));
+                return { "status": e.status, "message": e.message };
+            }
+        }
+
+        await models.doBatchAsync(queries);
+        pendingUpdates.forEach(uuid => cache.del(uuid));
+        return { status: 200, message: "Properties have been dropped, and any indexes have been rebuilt" };
+    }
+}
 
 async function lockForUpdate(uuid) {
     const min_interval = 1;
