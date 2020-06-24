@@ -31,7 +31,7 @@ Here is a concrete example of a "data" field in JSON:
     ],
     "entity": {
         "application": "Demo",
-        "type": "SqlServer",
+        "type": "SQLServer",
         "name": "dfw01sql001"
     },
     "task": {
@@ -51,7 +51,7 @@ And, here is the "properties" list that is internally generated that matches the
         "state" 
     ],
     entity.application: "Demo",
-    entity.type: "SqlServer",
+    entity.type: "SQLServer",
     entity.name: "dfw01sql001",
     task.type: "maintenance",
     task.actions: ["backup", "shrink", "re-index"],
@@ -61,7 +61,7 @@ And, here is the "properties" list that is internally generated that matches the
 
 This properties list is used internally to merge JSON data across requests on PUT and PATCH API calls.
 
-The indices collection is a reserved property. It contains an array list of indices. Each index is comprised of a single string of comma separated values (with no white space) that map to the properties used to construct a composite index. In this particular case, we have a comma separated list of "entity.application" which is "Demo", "entity.type" which is "SqlServer", and "entity.name" which is "dfw01sql001". The state field is in the record itself and is a numeric value of 0, 1 or 2. 0 means intiated a request, 1 means recieved a status update, 2 means complete. The intent of state is to keep it that simple for a reason. I you were to examine the clustering index on the request_index table, it becomes clear that introducing more granular state might present some problems querying for requests. The underlying assumption is that the state of any given request for a particular entity (or however you might classify what it is you plan to track) should be in one and only one state. It is further assumed that at this level one and only one request can be in any other status than complete.
+The indices collection is a reserved property. It contains an array list of indices. Each index is comprised of a single string of comma separated values (with no white space) that map to the properties used to construct a composite index. In this particular case, we have a comma separated list of "entity.application" which is "Demo", "entity.type" which is "SQLServer", and "entity.name" which is "dfw01sql001". The state field is in the record itself and is a numeric value of 0, 1 or 2. 0 means intiated a request, 1 means recieved a status update, 2 means complete. The intent of state is to keep it that simple for a reason. I you were to examine the clustering index on the request_index table, it becomes clear that introducing more granular state might present some problems querying for requests. The underlying assumption is that the state of any given request for a particular entity (or however you might classify what it is you plan to track) should be in one and only one state. It is further assumed that at this level one and only one request can be in any other status than complete.
 
 To summarize "state" values:
 <pre>
@@ -72,12 +72,12 @@ To summarize "state" values:
 
 When adding this request, 3 indexes will be added as follows:
 <pre>
-key_name: "entity.application,entity.type,entity.name,current", key_value: "Demo\u0000SqlServer\u0000dfw01sql001\u0000" ...
-key_name: "entity.application,entity.type,entity.name,state", key_value: "Demo\u0000SqlServer\u0000dfw01sql001\u00000\u0000" ...
+key_name: "entity.application,entity.type,entity.name,current", key_value: "Demo\u0000SQLServer\u0000dfw01sql001\u0000" ...
+key_name: "entity.application,entity.type,entity.name,state", key_value: "Demo\u0000SQLServer\u0000dfw01sql001\u00000\u0000" ...
 key_name: "state", key_value: "0\u0000" ...
 </pre>
 
-All four of these also include the created date and the request uuid where the created date is clustered in descending order.
+All three of these also include the created date and the request uuid where the created date is clustered in descending order.
 
 Fields in the composite index are delimited by a back-slash u ('\u') JavaScript styled hex zero character. This virtually eliminates any possible collisions from other indices. It also means that it is very difficult to use a simple CQL editor to get at this data. However, it does not mean that each property in the composite index operates separately in a query using a greater than or greater or equal operator. This something we will dive more into later. But, essentially you can drive behavior by supplying a level number to a GT or GE operator which will determine at what property level you can limit results to what is supplied for a given property value. 
 
@@ -93,7 +93,7 @@ This instructs the query to find any on any part of the index that is greater th
         "uuid": "927d5ab0-a5d0-11ea-bb37-0242ac130002",
         "body": "body",
         "created": "2020-06-03T19:30:24.463Z",
-        "data": "{ \"indices\": [ \"entity.type,entity.name,entity.options,state\", \"state\" ], \"entity\": {    \"type\": \"SqlServer\",\"name\": \"dfw01sql003\", \"options\": [\"backup\", \"shrink\", \"re-index\"] } }",
+        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\",\"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"application\":\"Demo\",\"type\":\"SQLServer\",\"name\":\"dfw01sql003\"},\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\",\"shrink\",\"re-index\"]},\"current\":true}",
         "display_message": "",
         "headers": "{}",
         "method": "POST",
@@ -105,7 +105,7 @@ This instructs the query to find any on any part of the index that is greater th
         "uuid": "1a268248-a5d1-11ea-bb37-0242ac130002",
         "body": "body",
         "created": "2020-06-03T19:34:21.569Z",
-        "data": "{ \"indices\": [ \"entity.type,entity.name,entity.options,state\", \"state\" ], \"entity\": {    \"type\": \"Oracle\",\"name\": \"dfw01oral001\", \"options\": [\"backup\", \"shrink\", \"re-index\"] } }",
+        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\",\"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"application\":\"Demo\",\"type\":\"Oracle\",\"name\":\"dfw01ora001\"},\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\",\"shrink\",\"re-index\"]},\"current\":true}",
         "display_message": "",
         "headers": "{}",
         "method": "POST",
@@ -117,7 +117,7 @@ This instructs the query to find any on any part of the index that is greater th
         "uuid": "3f1deb90-a5d1-11ea-bb37-0242ac130002",
         "body": "body",
         "created": "2020-06-03T19:35:06.651Z",
-        "data": "{ \"indices\": [ \"entity.type,entity.name,entity.options,state\", \"state\" ], \"entity\": {    \"type\": \"Oracle\",\"name\": \"dfw01oral002\", \"options\": [\"backup\", \"shrink\", \"re-index\"] } }",
+        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\",\"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"application\":\"Demo\",\"type\":\"Oracle\",\"name\":\"dfw01ora002\"},\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\",\"shrink\",\"re-index\"]},\"current\":true}",
         "display_message": "",
         "headers": "{}",
         "method": "POST",
@@ -129,7 +129,7 @@ This instructs the query to find any on any part of the index that is greater th
         "uuid": "5e8edb24-a5d1-11ea-bb37-0242ac130002",
         "body": "body",
         "created": "2020-06-03T19:35:54.464Z",
-        "data": "{ \"indices\": [ \"entity.type,entity.name,entity.options,state\", \"state\" ], \"entity\": {    \"type\": \"Oracle\",\"name\": \"dfw01oral003\", \"options\": [\"backup\", \"shrink\", \"re-index\"] } }",
+        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\",\"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"application\":\"Demo\",\"type\":\"Oracle\",\"name\":\"dfw01ora003\"},\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\",\"shrink\",\"re-index\"]},\"current\":true}",
         "display_message": "",
         "headers": "{}",
         "method": "POST",
@@ -141,7 +141,7 @@ This instructs the query to find any on any part of the index that is greater th
         "uuid": "362fceb5-09fe-44c4-b72e-180451483eca",
         "body": "body",
         "created": "2020-06-03T19:29:35.053Z",
-        "data": "{ \"indices\": [ \"entity.type,entity.name,entity.options,state\", \"state\" ], \"entity\": {    \"type\": \"SqlServer\",\"name\": \"dfw01sql002\", \"options\": [\"backup\", \"shrink\", \"re-index\"] } }",
+        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\",\"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"application\":\"Demo\",\"type\":\"SQLServer\",\"name\":\"dfw01sql002\"},\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\",\"shrink\",\"re-index\"]},\"current\":true}",
         "display_message": "",
         "headers": "{}",
         "method": "POST",
@@ -153,7 +153,7 @@ This instructs the query to find any on any part of the index that is greater th
         "uuid": "a4ebbfeb-20db-44b6-89ad-a8bdca5a1e44",
         "body": "body",
         "created": "2020-06-03T19:21:33.445Z",
-        "data": "{ \"indices\": [ \"entity.type,entity.name,entity.options,state\", \"state\" ], \"entity\": {    \"type\": \"SqlServer\",\"name\": \"dfw01sql001\", \"options\": [\"backup\", \"shrink\", \"re-index\"] } }",
+        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\",\"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"application\":\"Demo\",\"type\":\"SQLServer\",\"name\":\"dfw01sql001\"},\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\",\"shrink\",\"re-index\"]},\"current\":true}",
         "display_message": "",
         "headers": "{}",
         "method": "POST",
@@ -165,17 +165,17 @@ This instructs the query to find any on any part of the index that is greater th
 
 Similarly:
 <pre>
-http://localhost:8081/activity-service/v1/request?entity.type=MySql&entity.name&entity.options&state&operator=GE1
+http://localhost:8081/activity-service/v1/request?entity.type=MySQL&entity.name&entity.options&state&operator=GE1
 </pre>
 
-Produces results limited to the entity.type="MySql":
+Produces results limited to the entity.type="MySQL":
 <pre>
 [
     {
         "uuid": "54e0640e-a69d-11ea-bb37-0242ac130002",
         "body": "body",
         "created": "2020-06-04T19:56:29.895Z",
-        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\", \"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"type\":\"MySql\",\"name\":\"dfw01mysl001\",\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\"]}}",
+        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\", \"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"application\":\"Demo\",\"type\":\"MySQL\",\"name\":\"dfw01msq001\",\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\"]},\"current\":true}",
         "display_message": "",
         "headers": "{}",
         "method": "POST",
@@ -187,7 +187,7 @@ Produces results limited to the entity.type="MySql":
         "uuid": "8e1b30a0-a69d-11ea-bb37-0242ac130002",
         "body": "",
         "created": "2020-06-05T16:05:41.617Z",
-        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\", \"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"type\":\"MySql\",\"name\":\"dfw01mysl002\",\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\"]}},\"foreignKeys\":[\"response_uuid\"],\"response_uuid\":\"38872e8e-a74a-11ea-bb37-0242ac130002\",\"lastUpdated\":\"2020-06-05T18:36:57.258Z\"}",
+        "data": "{\"indices\":[\"entity.application,entity.type,entity.name,current\",\"entity.application,entity.type,entity.name,state\",\"state\"],\"entity\":{\"application\":\"Demo\",\"type\":\"MySQL\",\"name\":\"dfw01msq002\",\"task\":{\"type\":\"maintenance\",\"actions\":[\"backup\"]}},\"foreignKeys\":[\"response_uuid\"],\"response_uuid\":\"38872e8e-a74a-11ea-bb37-0242ac130002\",\"lastUpdated\":\"2020-06-05T18:36:57.258Z\",\"current\":true}",
         "display_message": "Backup is 10% complete",
         "headers": "{}",
         "method": "POST",
