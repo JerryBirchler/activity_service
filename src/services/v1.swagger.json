@@ -32,14 +32,14 @@
           {
             "name": "offset",
             "in": "query",
-            "description": "The number of consolidated accounts to skip before starting to collect the results. Default is zero.",
+            "description": "The number of rows to skip before starting to collect the results. Default is zero.",
             "type": "number",
             "pattern": "^[1-9]\\d*$"
           },
           {
             "name": "limit",
             "in": "query",
-            "description": "Maximum number of consolidated accounts to return. Default is 10.",
+            "description": "Maximum number of rows to return. Default is 10.",
             "type": "number",
             "pattern": "^[1-9]\\d*$"
           },
@@ -68,7 +68,7 @@
               "type": "object",
               "properties": {
                 "accounts": {
-                  "$ref": "#/definitions/consolidated-accounts"
+                  "$ref": "#/definitions/request"
                 },
                 "total_count": {
                   "type": "number",
@@ -84,7 +84,7 @@
           "request"
         ],
         "summary": "Create a request",
-        "operationId": "addAccount",
+        "operationId": "add",
         "consumes": [
           "application/json"
         ],
@@ -95,7 +95,7 @@
           {
             "in": "body",
             "name": "body",
-            "description": "Request be created.",
+            "description": "Request is created.",
             "required": true,
             "schema": {
               "$ref": "#/definitions/request"
@@ -120,8 +120,8 @@
         "tags": [
           "request"
         ],
-        "summary": "Get a request by id.",
-        "operationId": "getRequestById",
+        "summary": "Get a request by uuid.",
+        "operationId": "getByUuId",
         "produces": [
           "application/json"
         ],
@@ -165,12 +165,12 @@
       ],
       "properties": {
         "uuid": {
-          "type": "string",
+          "type": "uuid",
           "readOnly": true
         },
         "method": {
           "type": "string",
-          "description": "the HTTP method"
+          "description": "the HTTP method: GET, POST, PUT, PATCH, DELETE"
         },
         "url": {
           "type": "string",
@@ -178,7 +178,7 @@
         },
         "headers": {
           "type": "string",
-          "description": "the HTTP headers"
+          "description": "a dictionary of the HTTP headers"
         },
         "body": {
           "type": "string",
@@ -188,9 +188,13 @@
           "type": "string",
           "description": "the task id returned from an API call"
         },
+        "display_message": {
+          "type": "string",
+          "description": "a user friendly message that explains the current state of the request"
+        },
         "created": {
           "type": "number",
-          "description": "Epoch time when the account detail updated recently"
+          "description": "Epoch GMT time when the account detail updated recently"
         },
         "state": {
           "type": "number",

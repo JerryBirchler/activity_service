@@ -1,7 +1,6 @@
 CREATE TABLE response (
     "uuid" uuid,
     body text,
-    content_type text,
     data text,
     display_message text,
     headers text,

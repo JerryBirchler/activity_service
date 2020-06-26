@@ -14,11 +14,9 @@ log4js.configure(config.log4js);
 const logger = log4js.getLogger('server');
 
 async function start(options) {
-    console.log(options);
     let defaultOptions = { appStarted: undefined, port: config.server.port };
     options = options || defaultOptions;
     options.port = options.port || config.server.port;
-    console.log(options);
 
     logger.info('initializing models...');
 

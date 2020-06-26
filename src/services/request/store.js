@@ -1,4 +1,4 @@
-const { request } = require('http'),
+const
     NodeCache = require( "node-cache" ),
     cache = new NodeCache(),
     models = require('express-cassandra'),
@@ -6,29 +6,28 @@ const { request } = require('http'),
     log4js = require('log4js'),
     _ = require('lodash'),
     Uuid = require('cassandra-driver').types.Uuid,
-    validate = require('uuid-validate'),
     Request = models.instance.Request,
     Request_Index = models.instance.Request_Index,
     _reservedQueryStrings = { limit: true, offset: true, operator: "GE" },
     _baseIndices = {state: true, task_id: true},
     _reservedProperties = { indices: true, foreignKeys: true, lastUpdated: true , current: true},
     _requiredProperties = {},
-    _ex = require('./exceptions');
+    _ex = require('../../helpers/exceptions');
 
-const logger = log4js.getLogger('activity-service-store');
+const logger = log4js.getLogger('request store');
 
 class Store {
     constructor() {
     }
     async init(config) {
-        logger.info(`Store init`);
+        logger.info(`init`);
         const required = config["required_request_properties"] || ["entity.application", "entity.type", "entity.name", "task.type", "current"];
         required.forEach(property => {
             _requiredProperties[property] = true;
         });
     }
     async get(query) {
-        logger.info("Store get called");
+        logger.info("get");
         let key_name = "";
         let key_value = "";
         let key_limit = "";
@@ -43,7 +42,7 @@ class Store {
 
         let level = 0;
         _.keysIn(query).forEach(key => {
-            logger.debug(`Store get key: [${key}]`);
+            logger.debug(`get key: [${key}]`);
             if (!_reservedQueryStrings[key]) {
                 key_name += (key_name == "") ? key : "," + key;
                 const value = query[key];
@@ -67,7 +66,7 @@ class Store {
             }
         });
 
-        logger.debug(`Store get key_name: [${key_name}], key_value: [${key_value}], key_limit[${key_limit}], opLevel: [${opLevel}]`);
+        logger.debug(`get key_name: [${key_name}], key_value: [${key_value}], key_limit[${key_limit}], opLevel: [${opLevel}]`);
         const uuids = {};
         const indexes = operator.startsWith("GE")
             ? await Request_Index.findAsync({ key_name, key_value: { '$gte': key_value, '$lte': key_limit } }, { consistency: models.consistencies.local_quorum })
@@ -88,11 +87,11 @@ class Store {
         return await Request.findAsync({ uuid: { '$in': inClause } }, { consistency: models.consistencies.local_quorum });
     }
     async getByuuid(uuid) {
-        logger.info("Store getByuuid called");
+        logger.info("getByuuid");
         if (!uuid)
             return;
 
-        logger.debug(`uuid: [${util.inspect(uuid)}]`);
+        logger.debug(`getByuuid uuid: [${util.inspect(uuid)}]`);
 
         const request = await Request.findOneAsync({ uuid: Uuid.fromString(uuid) }, { consistency: models.consistencies.local_quorum });
         if (!request)
@@ -112,7 +111,7 @@ class Store {
         return result;
     }
     async new(request) {
-        logger.info("Store new called");
+        logger.info("new");
         response = JSON.parse("{}");
         const before = await this.getByuuid(request.uuid);
 
@@ -164,7 +163,7 @@ class Store {
             }
         }
 
-        logger.debug(`keys: [${util.inspect(keys)}]`);
+        logger.debug(`new keys: [${util.inspect(keys)}]`);
 
         queries.push(new Request({
             uuid: Uuid.fromString(request.uuid),
@@ -187,7 +186,7 @@ class Store {
         return response;
     }
     async update(after, uuid, before, pendingUpdates) {
-        logger.info("Store update called");
+        logger.info("update");
         response = JSON.parse("{}");
         const return_queries = before ? true : false;
         before = before || await this.getByuuid(uuid);
@@ -215,13 +214,13 @@ class Store {
         after.created = before.created;
         before.uuid = before.uuid.toString();
 
-        logger.debug(`Store update after: ${util.inspect(after)}`);
+        logger.debug(`update after: ${util.inspect(after)}`);
 
         const after_data = JSON.parse(after.data);
         const before_data = JSON.parse(before.data);
-        logger.debug(`Store update after properties`);
+        logger.debug(`update after properties`);
         const after_properties = getProperties(after_data, false);
-        logger.debug(`Store update before properties`);
+        logger.debug(`update before properties`);
         const before_properties = getProperties(before_data, false);
         const queries = [];
 
@@ -232,7 +231,7 @@ class Store {
             const keys = [];
             let errors = false;
             before_data.indices.forEach(index => {
-                logger.debug(`Store update index: [${util.inspect(index)}] `);
+                logger.debug(`update index: [${util.inspect(index)}] `);
                 if (before.state !== after.state && index.split(',').includes("state")) {
                     const batch = buildKey(before, index, before_properties);
                     const interimError = buildKeyObject(before, batch, keys);
@@ -243,7 +242,7 @@ class Store {
             keys.forEach(key => queries.push(new Request_Index(key).delete({ return_query: true })));
 
             before_data.indices.forEach(index => {
-                logger.debug(`Store update index: [${util.inspect(index)}] `);
+                logger.debug(`update index: [${util.inspect(index)}] `);
                 if (before.state !== after.state && index.split(',').includes("state")) {
                     const batch = buildKey(after, index, before_properties);
                     const interimError = buildKeyObject(after, batch, keys);
@@ -252,7 +251,7 @@ class Store {
             });
 
             keys.forEach(key => queries.push(new Request_Index(key).save({ return_query: true })));
-            queries.forEach(query => logger.debug(`Store update query: [${util.inspect(query)}]`));
+            queries.forEach(query => logger.debug(`update query: [${util.inspect(query)}]`));
         }
 
         //======================================================
@@ -261,7 +260,7 @@ class Store {
         const data = before_data;
 
         for (let property in after_properties) {
-            logger.debug(`Store update property: [${property}]`);
+            logger.debug(`update property: [${property}]`);
             const parts = property.split('.');
             try {
                 let data_cursor = data;
@@ -344,7 +343,7 @@ class Store {
     /// and that the adjusted index needs to be inserted.
     ///
     async dropProperties(body, query) {
-        logger.info("Store drop properties called");
+        logger.info("drop properties");
         const drop_data = JSON.parse(body.data || "{}");
         const drop_properties = getProperties(drop_data, false);
 
@@ -561,7 +560,7 @@ async function lockForUpdate(uuid) {
     }
 
     if (cache.get(uuid)) {
-        throw new _ex.TimeoutException(uuid);
+        throw new _ex.TimeoutException("request", uuid);
     }
 
     cache.set(uuid);

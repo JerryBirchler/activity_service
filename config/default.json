@@ -19,5 +19,17 @@
       }
     }
   },
-  "required_request_properties": ["entity.application", "entity.type", "entity.name", "task.type", "current"]
+  "required_request_properties": ["entity.application", "entity.type", "entity.name", "task.type", "current"],
+  "update_timeout_properties": {
+    "request": { 
+      "sleep_ms_previous": 1,  
+      "sleep_ms_next": 1,
+      "limit": 1500  
+    },
+    "response": { 
+      "sleep_ms_previous": 1,  
+      "sleep_ms_next": 1,
+      "limit": 1500  
+    }
+  }
 }
