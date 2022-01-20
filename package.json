@@ -30,7 +30,7 @@
     "koa-router": "^7.4.0",
     "koa2-swagger-ui": "^2.9.3",
     "lodash": "^4.17.10",
-    "log4js": "^3.0.5",
+    "log4js": "^6.4.0",
     "log4js-k8s": "^0.9.1",
     "node-cache": "^4.2.0",
     "node-persist": "^3.0.1",
