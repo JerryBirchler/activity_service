@@ -38,7 +38,7 @@
     "request-promise": "^4.2.4",
     "uuid": "^3.3.2",
     "uuid-validate": "0.0.3",
-    "validator": "^10.11.0"
+    "validator": "^13.7.0"
   },
   "devDependencies": {
     "eslint": "^5.4.0",
